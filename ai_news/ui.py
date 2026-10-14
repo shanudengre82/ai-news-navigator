@@ -11,6 +11,7 @@ import html
 import math
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 import gradio as gr
@@ -29,6 +30,7 @@ EXAMPLES = [
     "Efficient fine-tuning of LLMs: LoRA and its newer variants",
     "What's new in AI agents that use tools and browse the web?",
 ]
+ABOUT_MD = Path(__file__).with_name("about.md").read_text(encoding="utf-8")
 ASK_PLACEHOLDER = "What do you want to read about?"
 ASK_EMPTY = ("Ask a question above. The assistant searches the collection, keeps only what is relevant, "
              "and gives you a short reading list with the reason for each pick.")
@@ -142,7 +144,34 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px; }
 .nv-dot.ok { background:var(--kept); } .nv-dot.bad { background:var(--dropped); }
 
+/* about: technical summary */
+.nv-about { font-size:15px; line-height:1.55; color:var(--ink); }
+.nv-about .md { max-width:none !important; }
+.nv-about p, .nv-about ol, .nv-about ul, .nv-about h2, .nv-about h3 { max-width:76ch; }
+.nv-about h2 { font-family:var(--serif); font-weight:500; font-size:34px; line-height:1.15; margin:8px 0 12px; }
+.nv-about h3 { font-family:var(--serif); font-weight:500; font-size:27px; line-height:1.2; margin:40px 0 10px; }
+.nv-about p, .nv-about li { font-size:15px !important; }
+.nv-about table { display:block; overflow-x:auto; width:100%; border-collapse:collapse !important;
+  border:none !important; margin:8px 0 4px; font-size:14px; }
+.nv-about th, .nv-about td { border:none !important; border-bottom:1px solid var(--rule) !important;
+  background:transparent !important; text-align:left; vertical-align:top; }
+.nv-about th { font-weight:600; color:var(--graphite); padding:8px 18px 8px 0 !important; white-space:nowrap; }
+.nv-about td { padding:12px 18px 12px 0 !important; }
+.nv-about td:nth-child(1) { width:16%; min-width:150px; }
+.nv-about td:nth-child(2) { width:22%; min-width:180px; color:var(--graphite); }
+.nv-about td:nth-child(3) { width:42%; min-width:300px; }
+.nv-about td:nth-child(4) { width:20%; min-width:170px; font-size:13px; color:var(--graphite); }
+.nv-about tr, .nv-about thead, .nv-about tbody { border:none !important; background:transparent !important; }
+.nv-about code { font-size:.9em; background:color-mix(in srgb, var(--rule) 45%, transparent); padding:0 4px;
+  border-radius:3px; white-space:normal; word-break:break-word; }
+
 @media (max-width: 640px) {
+  .nv-about table, .nv-about tbody, .nv-about tr, .nv-about td { display:block; width:auto !important; }
+  .nv-about thead { display:none; }
+  .nv-about tr { padding:12px 0; border-bottom:1px solid var(--rule) !important; }
+  .nv-about td { min-width:0 !important; border:none !important; padding:2px 0 !important; }
+  .nv-about td:nth-child(1) { font-size:17px; }
+  .nv-about td:nth-child(3) { padding-top:6px !important; }
   .nv-masthead h1 { font-size:27px; }
   .nv-ask textarea { font-size:17px !important; }
   .nv-step { grid-template-columns:1fr 3.5rem; gap:4px 10px; }
@@ -437,6 +466,9 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                                 variant="secondary", size="sm")
                 out = gr.HTML()
                 btn.click(refresh_now, None, [out, stat, masthead])
+
+            with gr.Tab("About"):
+                gr.Markdown(ABOUT_MD, elem_classes="nv-about")
 
         demo.load(latest, [l_sources, l_type, l_n], feed, api_name="latest_feed")
         demo.load(status, None, stat, api_name="status")
