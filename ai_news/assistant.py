@@ -54,6 +54,10 @@ def _trace_md(trace: list[str]) -> str:
 
 
 def error_message(err: str) -> str:
+    if "quota" in err.lower():
+        return ("⚠️ The free ZeroGPU quota for this visitor is used up.\n\n"
+                f"`{err}`\n\nLog in to huggingface.co (free accounts get more GPU time) or try again later. "
+                "Keyword Search and Latest keep working without a GPU.")
     return (f"⚠️ The assistant hit an error: `{err}`\n\n"
             "Please try again in a moment. Keyword Search still works meanwhile.")
 

@@ -24,7 +24,7 @@ class Settings:
     # "local" = transformers pipeline in-process (ZeroGPU / local GPU / CPU); "api" = HF Inference API.
     llm_backend: str = field(default_factory=lambda: os.getenv("LLM_BACKEND", "local"))
     llm_model_id: str = field(default_factory=lambda: os.getenv("LLM_MODEL_ID", "Qwen/Qwen2.5-7B-Instruct"))
-    llm_max_new_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_NEW_TOKENS", "900")))
+    llm_max_new_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_NEW_TOKENS", "700")))
     embed_model_id: str = field(default_factory=lambda: os.getenv("EMBED_MODEL_ID", "BAAI/bge-small-en-v1.5"))
     rerank_model_id: str = field(default_factory=lambda: os.getenv("RERANK_MODEL_ID", "BAAI/bge-reranker-base"))
 

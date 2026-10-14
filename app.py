@@ -51,7 +51,7 @@ def run_refresh() -> str:
                    push=settings.push_to_hub and bool(settings.hf_token))
 
 
-@spaces.GPU(duration=120)
+@spaces.GPU(duration=75)  # ZeroGPU reserves ~1.5x this from the visitor's daily quota
 def _assistant_gpu(question: str, history_texts: list[str], filters: dict):
     """Runs in the ZeroGPU worker: yields plain dicts (picklable) and reports errors as events."""
     yield from run_events(graph, store, question, history_texts, filters)

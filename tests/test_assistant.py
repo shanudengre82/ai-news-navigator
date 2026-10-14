@@ -61,3 +61,9 @@ def test_store_lock_is_usable_in_forked_child(store):
             os._exit(0 if ok else 1)
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0
+
+
+def test_quota_errors_get_a_friendly_hint():
+    from ai_news.assistant import error_message
+    msg = error_message("Error: 'You have exceeded your ZeroGPU quota (180s requested vs. 179s left).'")
+    assert "Log in" in msg and "quota" in msg
