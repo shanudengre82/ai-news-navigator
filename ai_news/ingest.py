@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 
@@ -11,6 +12,15 @@ from ai_news.store import META_FILE, CorpusStore
 
 log = logging.getLogger(__name__)
 _refresh_lock = threading.Lock()
+
+
+def _reset_lock_after_fork() -> None:  # see store._after_fork_in_child
+    global _refresh_lock
+    _refresh_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_lock_after_fork)
 
 
 def refresh(store: CorpusStore, sources_file, lookback_days: int, push: bool = True) -> str:

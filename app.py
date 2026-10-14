@@ -2,6 +2,8 @@
 
 import os
 
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # tokenizers' thread pool is not fork-safe
+
 if os.getenv("SPACE_ID"):  # on Spaces, keep caches and data in writable locations
     os.environ.setdefault("HF_HOME", "/tmp/hf-cache")
     os.environ.setdefault("DATA_DIR", "/tmp/ai-news-data")
@@ -19,7 +21,8 @@ from ai_news.rag.nodes import RagNodes  # noqa: E402
 from ai_news.search import DATE_WINDOWS  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
 from ai_news import scheduler  # noqa: E402
-from ai_news.ui import CSS, build_ui, format_references  # noqa: E402
+from ai_news.assistant import message_text, render, run_events  # noqa: E402
+from ai_news.ui import CSS, build_ui  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -49,6 +52,20 @@ def run_refresh() -> str:
 
 
 @spaces.GPU(duration=120)
+def _assistant_gpu(question: str, history_texts: list[str], filters: dict):
+    """Runs in the ZeroGPU worker: yields plain dicts (picklable) and reports errors as events."""
+    yield from run_events(graph, store, question, history_texts, filters)
+
+
+def _guarded(events):
+    """Turn ZeroGPU-level failures (quota, worker crash) into an error event instead of a bare toast."""
+    try:
+        yield from events
+    except Exception as e:
+        log.exception("ZeroGPU call failed")
+        yield {"error": f"{type(e).__name__}: {e}"[:500]}
+
+
 def research_assistant(message: str, history: list, sources: list[str], source_type: str, window: str):
     """Ask the AI research assistant. It searches the corpus (hybrid BM25 + vectors), reranks, has an LLM
     judge relevance, rewrites the query or searches arXiv live if needed, and answers with cited references.
@@ -63,25 +80,10 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
     if not message or not message.strip():
         yield history, "_Ask a question to get ranked references._", "", ""
         return
-    store.reload_if_stale()
-    history = list(history or []) + [{"role": "user", "content": message},
-                                     {"role": "assistant", "content": "⏳ Analyzing your question…"}]
-    yield history, "_Searching…_", "", ""
-    state = {"question": message,
-             "history": [m["content"] for m in history[:-2] if m.get("role") == "user"],
-             "filters": {"sources": sources or None, "source_type": source_type,
-                         "days": DATE_WINDOWS.get(window)}}
-    trace: list[str] = []
-    final: dict = {}
-    for update in graph.stream(state, stream_mode="updates"):
-        for node, delta in update.items():
-            trace += delta.get("trace", [])
-            final.update(delta)
-            history[-1]["content"] = f"⏳ {trace[-1].split('→')[0].replace('**', '').strip()} done, working…"
-            yield history, "_Searching…_", "\n\n".join(f"{i}. {t}" for i, t in enumerate(trace, 1)), ""
-    history[-1]["content"] = final.get("answer", "Something went wrong — please try again.")
-    yield history, format_references(final.get("references", [])), \
-        "\n\n".join(f"{i}. {t}" for i, t in enumerate(trace, 1)), ""
+    history_texts = [message_text(m.get("content")) for m in (history or [])
+                     if isinstance(m, dict) and m.get("role") == "user"]
+    filters = {"sources": sources or None, "source_type": source_type, "days": DATE_WINDOWS.get(window)}
+    yield from render(_guarded(_assistant_gpu(message, history_texts, filters)), history, message)
 
 
 demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh, pull_mode=settings.refresh_mode == "pull")
@@ -92,4 +94,4 @@ if settings.refresh_hours > 0:
 log.info("refresh mode: %s, every %s h", settings.refresh_mode, settings.refresh_hours)
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=2).launch(css=CSS, mcp_server=True)
+    demo.queue(default_concurrency_limit=2).launch(css=CSS, mcp_server=True, show_error=True)

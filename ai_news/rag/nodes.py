@@ -78,7 +78,7 @@ class RagNodes:
     def analyze_query(self, state: GraphState) -> dict:
         q = state["question"]
         hist = state.get("history") or []
-        history = ("Earlier questions in this conversation: " + " | ".join(hist[-2:])) if hist else ""
+        history = ("Earlier questions in this conversation: " + " | ".join(map(str, hist[-2:]))) if hist else ""
         try:
             data = extract_json(self._ask(prompts.ANALYZE.format(question=q, history=history)))
             queries = [s for s in data.get("search_queries", []) if isinstance(s, str) and s.strip()][:3] or [q]

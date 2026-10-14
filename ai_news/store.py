@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -60,6 +62,21 @@ class VectorIndex:
         return self.index.ntotal if self.index is not None else 0
 
 
+_STORES: "weakref.WeakSet[CorpusStore]" = weakref.WeakSet()
+
+
+def _after_fork_in_child() -> None:
+    """ZeroGPU forks a GPU worker from the main process. If a background refresh held a store lock at
+    that moment, the child would inherit it locked forever — give each store a fresh lock instead."""
+    for s in list(_STORES):
+        s._lock = threading.RLock()
+    faiss.omp_set_num_threads(1)  # OpenMP thread pools don't survive fork
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 class CorpusStore:
     def __init__(self, data_dir: Path, embeddings: Embeddings, dataset_repo: str | None = None,
                  hf_token: str | None = None, retention_days: int = 180):
@@ -76,6 +93,7 @@ class CorpusStore:
         self._bm25: BM25Okapi | None = None
         self._bm25_ids: list[str] = []
         self._snapshot_mtime = 0.0  # mtime of the on-disk snapshot this process last loaded or wrote
+        _STORES.add(self)
 
     # ---------- persistence ----------
     def pull(self) -> bool:
