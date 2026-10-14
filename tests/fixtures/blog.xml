@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>Example AI Blog</title>
+  <item>
+    <title>Scaling test-time compute with &lt;b&gt;verifiers&lt;/b&gt;</title>
+    <link>https://example.com/blog/test-time-compute?utm_source=rss</link>
+    <pubDate>Mon, 12 Oct 2026 10:00:00 GMT</pubDate>
+    <description>&lt;p&gt;We study how &lt;em&gt;reasoning&lt;/em&gt; models benefit from more inference compute.&lt;/p&gt;</description>
+    <category>reasoning</category>
+  </item>
+  <item>
+    <title>Post without a date is skipped</title>
+    <link>https://example.com/blog/no-date</link>
+  </item>
+</channel>
+</rss>

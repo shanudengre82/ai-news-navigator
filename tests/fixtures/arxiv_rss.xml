@@ -1,0 +1,24 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+  <channel>
+    <title>cs.AI updates on arXiv.org</title>
+    <item>
+      <title>Speculative Decoding at Scale</title>
+      <link>https://arxiv.org/abs/2610.11111</link>
+      <description>arXiv:2610.11111v1 Announce Type: new 
+Abstract: We speed up LLM inference with draft models.</description>
+      <category>cs.CL</category>
+      <pubDate>Wed, 14 Oct 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:creator>Ada Lovelace, Alan Turing</dc:creator>
+    </item>
+    <item>
+      <title>An Old Paper, Revised</title>
+      <link>https://arxiv.org/abs/2401.00001</link>
+      <description>arXiv:2401.00001v3 Announce Type: replace 
+Abstract: Revised.</description>
+      <pubDate>Wed, 14 Oct 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>replace</arxiv:announce_type>
+    </item>
+  </channel>
+</rss>

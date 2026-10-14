@@ -1,0 +1,40 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/0MIIcwP0V8ZrQQRcj3WGf3A4aDo</id>
+  <title>arXiv Query: search_query=cat:cs.CL&amp;id_list=&amp;start=0&amp;max_results=2</title>
+  <updated>2026-10-14T02:38:03Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=cat:cs.CL&amp;start=0&amp;max_results=2&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>2</opensearch:itemsPerPage>
+  <opensearch:totalResults>122134</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2610.16201v1</id>
+    <title>Lüshi-1840: Building and Probing a Knowledge Cutoff for a Classical Chinese Language Model</title>
+    <updated>2026-10-12T05:31:38Z</updated>
+    <link href="https://arxiv.org/abs/2610.16201v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2610.16201v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Language models trained only on text from before a given year are useful for studying hindsight and historical language, but the open collections of pre-modern Chinese carry no publication dates and unreliable dynasty labels. We present Lüshi-1840, a 983M-parameter model trained from scratch on 12,262 books (1.28B characters) selected as composed before 1840. A first corpus, dated by a common heuristic, in effect ended at 1644 while containing twentieth-century material. We describe the re-dating and cleaning pipeline that replaced it and an audit with markers the pipeline did not use, which still finds later material. On the model side we measure surprisal, relative to a modern reference, on annals compiled after the cutoff. For events after 1840 against events up to 1820 the ratio is 1.38 (95% interval 1.33-1.44), against about 1.00 for modern general-purpose models. In a series of 294M models, adding the later court records lowers the ratio from 1.33 to 1.16, and the two models diverge from the 1820s, where the added records begin. The probe tracks the coverage of sources and does not establish a single cutoff year; none of our probes exposes the audited contamination. Model, book list and scripts will be released.</summary>
+    <category term="cs.CL" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-10-12T05:31:38Z</published>
+    <arxiv:comment>13 pages, 4 figures</arxiv:comment>
+    <arxiv:primary_category term="cs.CL"/>
+    <author>
+      <name>Alex Liu</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2610.16171v1</id>
+    <title>DeepThink: A Conceptual Model for Knowledge-Addressable Recurrent Language Modeling</title>
+    <updated>2026-10-12T04:45:53Z</updated>
+    <link href="https://arxiv.org/abs/2610.16171v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2610.16171v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>This manuscript presents DeepThink, a knowledge-addressable framework for recurrent language modeling. A Knowledge Bank stores typed Knowledge Units, a Knowledge Activator selects units from the current execution state, Knowledge Assembly produces an executable configuration, and a Shared Thinking Operator updates that state. An output stage then organizes generation. This organization exposes knowledge capacity, activation width, and recurrent depth as separate design variables, supporting both complete parameter packages and fine-grained expert or low-rank modules. We formalize the interfaces and their execution semantics, including state-dependent selection, parameter-space assembly, and thinking followed by generation. For compatible templates and complete runtime-state configurations, we establish an exact Fixed-Schedule Realization of an existing fixed-depth model. Exact shared-base reparameterization and pretrained output-tail reuse provide complementary initialization constructions. Together, these results define a route from pretrained models to dynamically selected and assembled recurrent computation. A synthesis of conditional computation, recurrent models, modular parameters, and knowledge interfaces positions DeepThink within the research landscape and identifies the design questions arising from their integration.</summary>
+    <category term="cs.CL" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-10-12T04:45:53Z</published>
+    <arxiv:comment>31 pages,7 figures</arxiv:comment>
+    <arxiv:primary_category term="cs.CL"/>
+    <author>
+      <name>Weiguo Chen</name>
+    </author>
+  </entry>
+</feed>
