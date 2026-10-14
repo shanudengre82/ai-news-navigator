@@ -42,6 +42,7 @@ def test_render_shows_error_and_references():
     history = [{"role": "user", "content": [{"type": "text", "text": "old"}]},
                {"role": "assistant", "content": "old answer"}]
     outs = list(render([{"error": "RuntimeError: cuda"}], history, "new q"))
+    assert all(len(o) == 5 and o[4] == o[0] for o in outs)  # chat is also stored in gr.State
     chat = outs[-1][0]
     assert len(chat) == 4 and chat[-2]["content"] == "new q"
     assert "⚠️" in chat[-1]["content"] and "RuntimeError: cuda" in chat[-1]["content"]

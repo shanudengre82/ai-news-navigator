@@ -72,13 +72,14 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
 
     Args:
         message: the research question
-        history: previous chat messages ([] for a new conversation)
+        history: (internal, from gr.State — not part of the public API) previous chat messages
         sources: restrict to these sources (empty = all)
         source_type: "any", "paper" or "blog"
         window: date window, e.g. "Any time", "Last week", "Last month"
     """
+    history = history if isinstance(history, list) else []
     if not message or not message.strip():
-        yield history, "_Ask a question to get ranked references._", "", ""
+        yield history, "_Ask a question to get ranked references._", "", "", history
         return
     history_texts = [message_text(m.get("content")) for m in (history or [])
                      if isinstance(m, dict) and m.get("role") == "user"]

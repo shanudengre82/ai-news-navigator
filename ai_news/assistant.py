@@ -63,20 +63,25 @@ def error_message(err: str) -> str:
 
 
 def render(events: Iterable[dict], history: list, question: str) -> Iterator[tuple]:
-    """Turn assistant events into the UI outputs (chat, references_md, trace_md, cleared_textbox)."""
+    """Turn assistant events into the UI outputs (chat, references_md, trace_md, cleared_textbox, state).
+    The chat list is returned twice: once for the Chatbot, once to store in the conversation gr.State."""
     base = list(history or []) + [{"role": "user", "content": question}]
 
     def chat(text: str) -> list:
         return base + [{"role": "assistant", "content": text}]
 
-    yield chat(WORKING), "_Searching…_", "", ""
+    def out(text: str, refs: str, trace: str) -> tuple:
+        c = chat(text)
+        return c, refs, trace, "", c
+
+    yield out(WORKING, "_Searching…_", "")
     for ev in events:
         trace = _trace_md(ev.get("trace", []))
         if "error" in ev:
-            yield chat(error_message(ev["error"])), "_No references (the request failed)._", trace, ""
+            yield out(error_message(ev["error"]), "_No references (the request failed)._", trace)
             return
         if "answer" in ev:
-            yield chat(ev["answer"]), format_references(ev["references"]), trace, ""
+            yield out(ev["answer"], format_references(ev["references"]), trace)
             return
         last = ev["trace"][-1] if ev.get("trace") else ""
-        yield chat(f"⏳ {last.split('→')[0].replace('**', '').strip()} done, working…"), "_Searching…_", trace, ""
+        yield out(f"⏳ {last.split('→')[0].replace('**', '').strip()} done, working…", "_Searching…_", trace)

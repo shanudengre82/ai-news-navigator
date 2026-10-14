@@ -26,10 +26,11 @@ def main(target: str) -> None:
     print(f"search: {len(urls)} links, e.g. {urls[:2]}")
     assert urls, "keyword search returned no links"
 
-    job = c.submit("What are recent approaches to improving LLM reasoning?", [], [], "any", "Any time",
+    job = c.submit("What are recent approaches to improving LLM reasoning?", [], "any", "Any time",
                    api_name="/research_assistant")
     chat, refs, trace, _ = job.result()
     answer = chat[-1]["content"] if isinstance(chat[-1], dict) else chat[-1][1]
+    assert "⚠️" not in str(answer), f"assistant reported an error: {answer}"
     ref_urls = re.findall(r"\]\((https?://[^)]+)\)", refs)
     print("trace:\n" + trace)
     print("answer:", str(answer)[:600])

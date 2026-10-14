@@ -107,6 +107,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 with gr.Row():
                     with gr.Column(scale=3):
                         chat = gr.Chatbot(height=520, label="Assistant", show_label=False)
+                        conv = gr.State([])
                         with gr.Row():
                             msg = gr.Textbox(placeholder="Ask about any AI topic, e.g. 'latest work on speculative decoding'",
                                              show_label=False, scale=5, submit_btn=True)
@@ -121,9 +122,11 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         refs = gr.Markdown("_Ask a question to get ranked references._", label="Recommended reading")
                         with gr.Accordion("🧭 Agent trace", open=False):
                             trace = gr.Markdown()
-                msg.submit(assistant_fn, [msg, chat, a_sources, a_type, a_window], [chat, refs, trace, msg])
-                clear.click(lambda: ([], "_Ask a question to get ranked references._", "", ""), None,
-                            [chat, refs, trace, msg], api_visibility="private")
+                # History lives in gr.State: it is hidden from the API/MCP schema, so callers only pass
+                # (message, sources, source_type, window) and can't send a malformed chat history.
+                msg.submit(assistant_fn, [msg, conv, a_sources, a_type, a_window], [chat, refs, trace, msg, conv])
+                clear.click(lambda: ([], "_Ask a question to get ranked references._", "", "", []), None,
+                            [chat, refs, trace, msg, conv], api_visibility="private")
 
             with gr.Tab("🔎 Keyword Search"):
                 with gr.Row():
