@@ -64,7 +64,7 @@ def format_references(refs: list[Candidate]) -> str:
 
 
 def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable,
-             refresh_fn: Callable[[], str]) -> gr.Blocks:
+             refresh_fn: Callable[[], str], pull_mode: bool = False) -> gr.Blocks:
 
     def search(query: str, sources: list[str], source_type: str, window: str, sort: str) -> str:
         """Keyword (BM25) search over collected AI papers and posts. Quote a phrase to require it verbatim.
@@ -93,7 +93,8 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 f"| Source | Items | Last fetch |\n|---|---:|---|\n{rows}")
 
     def refresh_now() -> tuple[str, str]:
-        """Fetch all sources now and update the index (takes a few minutes)."""
+        """Update the corpus now: fetch all sources (fetch mode, takes minutes) or download the latest
+        snapshot from the HF Dataset repo (pull mode)."""
         return refresh_fn(), status()
 
     with gr.Blocks(title="AI News & Research Navigator") as demo:
@@ -150,7 +151,10 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
 
             with gr.Tab("⚙️ Status"):
                 stat = gr.Markdown()
-                btn = gr.Button("🔄 Refresh now")
+                if pull_mode:
+                    gr.Markdown("New items are collected every 12 hours by a GitHub Action and saved to the "
+                                "HF Dataset repo. This Space downloads the latest snapshot automatically.")
+                btn = gr.Button("🔄 Sync now" if pull_mode else "🔄 Refresh now")
                 out = gr.Markdown()
                 btn.click(refresh_now, None, [out, stat])
                 demo.load(status, None, stat, api_name="status")

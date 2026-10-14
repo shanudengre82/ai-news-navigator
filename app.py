@@ -12,7 +12,7 @@ import logging  # noqa: E402
 
 from ai_news.config import settings  # noqa: E402
 from ai_news.fetchers import arxiv, load_sources  # noqa: E402
-from ai_news.ingest import refresh  # noqa: E402
+from ai_news.ingest import refresh, sync_from_hub  # noqa: E402
 from ai_news.llm import Reranker, load_chat_model, load_embeddings  # noqa: E402
 from ai_news.rag.graph import build_graph  # noqa: E402
 from ai_news.rag.nodes import RagNodes  # noqa: E402
@@ -42,6 +42,8 @@ SOURCE_NAMES = (["arXiv"] if sources_cfg.get("arxiv", {}).get("enabled") else []
 
 
 def run_refresh() -> str:
+    if settings.refresh_mode == "pull":
+        return sync_from_hub(store)
     return refresh(store, settings.sources_file, settings.lookback_days,
                    push=settings.push_to_hub and bool(settings.hf_token))
 
@@ -82,11 +84,12 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
         "\n\n".join(f"{i}. {t}" for i, t in enumerate(trace, 1)), ""
 
 
-demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh)
+demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh, pull_mode=settings.refresh_mode == "pull")
 
 if settings.refresh_hours > 0:
     scheduler.start(run_refresh, settings.refresh_hours,
                     run_first_after=60 if settings.refresh_on_start or not store.items else None)
+log.info("refresh mode: %s, every %s h", settings.refresh_mode, settings.refresh_hours)
 
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=2).launch(css=CSS, mcp_server=True)

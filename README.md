@@ -57,7 +57,8 @@ The corpus (`items.parquet`, `index.faiss`, `meta.json`) lives in a **Hugging Fa
 | `LLM_BACKEND` | `local` | `local` runs a transformers model in-process; `api` uses the HF Inference API (free credits) |
 | `LLM_MODEL_ID` | `Qwen/Qwen2.5-7B-Instruct` | Any open chat model |
 | `LOOKBACK_DAYS` | `30` | How many days of history a refresh fetches |
-| `REFRESH_HOURS` | `6` | Background refresh interval; `0` turns it off |
+| `REFRESH_MODE` | `fetch` | `fetch`: the Space fetches the feeds itself. `pull`: it only downloads the snapshot that the GitHub Action pushes |
+| `REFRESH_HOURS` | `6` | How often to fetch or pull; `0` turns it off |
 
 ## Run locally
 ```bash
@@ -69,13 +70,34 @@ python scripts/build_corpus.py --days 14 --no-push      # build the local corpus
 LLM_MODEL_ID=Qwen/Qwen2.5-3B-Instruct REFRESH_HOURS=0 python app.py
 ```
 
-## Deploy to Hugging Face (free account)
+## Deploy with GitHub Actions (free)
+```
+GitHub (push to main) ──► sync-to-hf.yml     ──► HF Space shanudengre82/ai-news-navigator (ZeroGPU)
+GitHub (every 12 h)   ──► refresh-corpus.yml ──► HF Dataset shanudengre82/ai-news-corpus ──► Space pulls it
+```
 A free account can host Gradio Spaces only on **ZeroGPU**: up to 2 Spaces, and the account needs a verified email and must be older than 30 days.
+
+**One-time setup**
+1. **GitHub repo:** go to **Settings → Secrets and variables → Actions**.
+   - Add the secret `HF_TOKEN`: a Hugging Face **write** token from https://huggingface.co/settings/tokens.
+   - Optionally add the variables `HF_SPACE` and `DATASET_REPO`. The workflows default to the names above.
+2. **HF Space:** go to **Settings → Variables and secrets** and add these variables:
+   - `DATASET_REPO=shanudengre82/ai-news-corpus`
+   - `REFRESH_MODE=pull`
+   - `REFRESH_HOURS=1`
+
+   If the dataset is private, also add the secret `HF_TOKEN`. Under **Settings → Hardware**, check that the hardware is **ZeroGPU**.
+3. Seed the data: on GitHub, open **Actions → Refresh corpus → Run workflow** (about 15–20 minutes).
+4. Push to `main`, or run **Actions → Sync to Hugging Face Space** by hand. The Space rebuilds with the new code.
+
+**What each workflow does**
+- `sync-to-hf.yml`: on every push to `main`, it uploads the code to the Space with `hf upload`. `tests/`, `data/` and `.github/` are not uploaded.
+- `refresh-corpus.yml`: every 12 hours, it fetches all sources on a CPU runner and embeds only the new items. It then pushes `items.parquet`, `index.faiss` and `meta.json` to the dataset. The Space picks up the new snapshot within `REFRESH_HOURS`.
+
+**Without GitHub**
 ```bash
-pip install -U huggingface_hub && hf auth login
-python scripts/build_corpus.py --days 30 --dataset-repo <you>/ai-news-corpus   # seed the dataset
-hf repos create <you>/ai-news-navigator --type space --space-sdk gradio --flavor zero-a10g \
-   --secrets HF_TOKEN=<write-token> --env DATASET_REPO=<you>/ai-news-corpus
+hf auth login
+python scripts/build_corpus.py --days 30 --dataset-repo <you>/ai-news-corpus
 hf upload <you>/ai-news-navigator . --repo-type space \
    --exclude ".venv/**" --exclude "data/**" --exclude "**/__pycache__/**" --exclude "tests/**"
 ```

@@ -55,3 +55,31 @@ def test_reload_if_stale_picks_up_other_process_writes(store, tmp_path):
     os.utime(meta, (meta.stat().st_atime, meta.stat().st_mtime + 5))  # make sure the mtime advances
     assert reader.reload_if_stale() is True
     assert len(reader.items) == len(store.items)
+
+
+def test_sync_from_hub_reloads_only_when_snapshot_changes(store, tmp_path):
+    import shutil
+
+    from ai_news.ingest import sync_from_hub
+
+    remote = tmp_path / "remote"   # stands in for the HF Dataset repo
+    store.data_dir = remote
+    store.mark_refreshed({"arXiv": "ok (1)"})
+    store.save()
+
+    space = CorpusStore(tmp_path / "space", DeterministicFakeEmbedding(size=32), dataset_repo="me/corpus")
+
+    def fake_pull():
+        shutil.copytree(remote, space.data_dir, dirs_exist_ok=True)
+        return True
+
+    space.pull = fake_pull
+    assert "Pulled new snapshot" in sync_from_hub(space)
+    assert set(space.items) == set(store.items)
+    assert "Already up to date" in sync_from_hub(space)
+
+    store.add([make_item("A newer paper on agents", "Tool-using agents.")])
+    store.mark_refreshed({"arXiv": "ok (2)"})
+    store.save()
+    assert "Pulled new snapshot" in sync_from_hub(space)
+    assert len(space.items) == len(store.items)

@@ -28,6 +28,9 @@ class Settings:
     embed_model_id: str = field(default_factory=lambda: os.getenv("EMBED_MODEL_ID", "BAAI/bge-small-en-v1.5"))
     rerank_model_id: str = field(default_factory=lambda: os.getenv("RERANK_MODEL_ID", "BAAI/bge-reranker-base"))
 
+    # "fetch": the Space fetches feeds itself; "pull": it only re-downloads the snapshot that the
+    # GitHub Action (.github/workflows/refresh-corpus.yml) pushes to DATASET_REPO.
+    refresh_mode: str = field(default_factory=lambda: os.getenv("REFRESH_MODE", "fetch").strip().lower())
     lookback_days: int = field(default_factory=lambda: int(os.getenv("LOOKBACK_DAYS", "30")))
     refresh_hours: float = field(default_factory=lambda: float(os.getenv("REFRESH_HOURS", "6")))
     refresh_on_start: bool = field(default_factory=lambda: _bool("REFRESH_ON_START", True))

@@ -1,0 +1,49 @@
+# Deploys the code to the Hugging Face Space on every push to main.
+# Needs: repo secret HF_TOKEN (HF write token); optional repo variable HF_SPACE.
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["tests/**", ".gitignore"]
+  workflow_dispatch:
+
+concurrency:
+  group: hf-space-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE: ${{ vars.HF_SPACE || 'shanudengre82/ai-news-navigator' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Hugging Face CLI
+        run: pip install -U huggingface_hub
+
+      - name: Check token
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::Add a repo secret HF_TOKEN (Hugging Face write token) under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Upload to Space
+        # --delete removes files that were deleted in git, limited to code folders so
+        # Space-only files (e.g. .gitattributes) are never touched.
+        run: >
+          hf upload "$HF_SPACE" . --repo-type space
+          --exclude ".git/**" --exclude ".github/**" --exclude "tests/**"
+          --exclude "data/**" --exclude ".venv/**" --exclude "**/__pycache__/**"
+          --delete "ai_news/**" --delete "scripts/**" --delete "config/**"
+          --commit-message "Sync from GitHub ${{ github.sha }}"
+
+      - name: Summary
+        run: echo "Deployed ${{ github.sha }} to https://huggingface.co/spaces/$HF_SPACE" >> "$GITHUB_STEP_SUMMARY"
