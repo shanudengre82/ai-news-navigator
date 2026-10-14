@@ -22,7 +22,7 @@ from ai_news.search import DATE_WINDOWS  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
 from ai_news import scheduler  # noqa: E402
 from ai_news.assistant import message_text, render, run_events  # noqa: E402
-from ai_news.ui import CSS, build_ui  # noqa: E402
+from ai_news.ui import CSS, FONTS_HEAD, build_ui, theme  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -79,7 +79,7 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
     """
     history = history if isinstance(history, list) else []
     if not message or not message.strip():
-        yield history, "_Ask a question to get ranked references._", "", "", history
+        yield "Type a question first, for example: *recent work on speculative decoding*.", "", "", "", history
         return
     history_texts = [message_text(m.get("content")) for m in (history or [])
                      if isinstance(m, dict) and m.get("role") == "user"]
@@ -95,4 +95,5 @@ if settings.refresh_hours > 0:
 log.info("refresh mode: %s, every %s h", settings.refresh_mode, settings.refresh_hours)
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=2).launch(css=CSS, mcp_server=True, show_error=True)
+    demo.queue(default_concurrency_limit=2).launch(theme=theme(), css=CSS, head=FONTS_HEAD,
+                                                      mcp_server=True, show_error=True)

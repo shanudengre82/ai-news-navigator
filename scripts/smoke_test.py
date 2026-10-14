@@ -28,11 +28,10 @@ def main(target: str) -> None:
 
     job = c.submit("What are recent approaches to improving LLM reasoning?", [], "any", "Any time",
                    api_name="/research_assistant")
-    chat, refs, trace, _ = job.result()
-    answer = chat[-1]["content"] if isinstance(chat[-1], dict) else chat[-1][1]
-    assert "⚠️" not in str(answer), f"assistant reported an error: {answer}"
-    ref_urls = re.findall(r"\]\((https?://[^)]+)\)", refs)
-    print("trace:\n" + trace)
+    answer, refs, sieve, _ = job.result()
+    assert "stopped with an error" not in answer and "GPU time" not in answer, f"assistant failed: {answer}"
+    ref_urls = re.findall(r'href="(https?://[^"]+)"', refs)
+    print("sieve counts:", re.findall(r'class="count">([^<]+)<', sieve))
     print("answer:", str(answer)[:600])
     print(f"references: {len(ref_urls)}", ref_urls[:3])
     assert ref_urls, "assistant returned no references"

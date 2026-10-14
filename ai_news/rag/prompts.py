@@ -36,8 +36,8 @@ Request: {question}
 Sources:
 {docs}
 
-Write in markdown:
-1. A concise synthesis (2-4 short paragraphs) of what these sources say about the request,
-   citing sources inline as [1], [2]. Mention concrete methods, models, or findings.
-2. A line starting with "**Start with:**" naming the single best source to read first and why.
+Write 2 to 4 short paragraphs of plain prose (no headings, no numbered lists) that summarize what these
+sources say about the request. Cite sources inline as [1], [2]. Mention concrete methods, models, or findings.
+End with one final paragraph that begins with "**Start with** [n]" and says in one sentence why that
+source is the best one to read first.
 Do not invent sources, numbers, or links. If the sources only partly cover the request, say so."""

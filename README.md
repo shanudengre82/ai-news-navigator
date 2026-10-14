@@ -22,8 +22,9 @@ tags:
 
 Keep up with AI research without paying for anything. The app collects new papers and posts from open sources, then lets you search them in two ways:
 
-- **🔎 Keyword Search**: BM25 search with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
-- **🤖 Research Assistant**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). It filters the documents and returns the best references, each with a reason it was chosen and citations.
+- **Ask**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). You get a short answer with citations and a "Read these first" list, with the reason for each pick. A live *sieve* shows how the collection was narrowed at each step: matched, reranked, judged relevant, used.
+- **Search**: BM25 keyword search with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
+- **Latest**: the newest papers and posts, filtered by source and type.
 
 ## Sources (all free and open; edit `config/sources.yaml`)
 | Kind | Sources |
@@ -47,7 +48,7 @@ analyze_query ─► retrieve ─► rerank ─► grade_documents ─┬─ ≥
 The corpus (`items.parquet`, `index.faiss`, `meta.json`) lives in a **Hugging Face Dataset repo**:
 1. On startup the Space downloads it.
 2. While the Space is awake, it refreshes every `REFRESH_HOURS` (6 by default) and pushes the result back.
-3. The **⚙️ Status** tab has a "Refresh now" button.
+3. The **Sources** tab shows the health of each source and has a button to update the collection now.
 
 ## Configuration (Space secrets / variables)
 | Name | Default | Purpose |

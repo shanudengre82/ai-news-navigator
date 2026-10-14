@@ -11,11 +11,11 @@ import logging
 from typing import Any, Iterable, Iterator
 
 from ai_news.store import CorpusStore
-from ai_news.ui import format_references
+from ai_news.ui import answer_md, reading_list_html, sieve_html
 
 log = logging.getLogger(__name__)
 
-WORKING = "⏳ Analyzing your question…"
+WORKING = "Reading your question…"
 
 
 def message_text(content: Any) -> str:
@@ -31,57 +31,81 @@ def message_text(content: Any) -> str:
     return str(content)
 
 
+COUNT_FIELD = {"retrieve": "candidates", "rerank": "candidates", "live_search": "candidates",
+               "grade_documents": "relevant", "rewrite_query": "queries", "generate": "references"}
+
+
+def step_of(node: str, delta: dict) -> dict:
+    field = COUNT_FIELD.get(node)
+    return {"node": node, "count": len(delta.get(field) or []) if field else None}
+
+
 def run_events(graph, store: CorpusStore, question: str, history: list[str], filters: dict) -> Iterator[dict]:
+    """Events: {"total", "steps", "trace"} per graph node, then a final one with "answer" + "references"
+    (or "error"). Steps carry real counts from the graph state, for the sieve visualization."""
     trace: list[str] = []
+    steps: list[dict] = []
+    total = 0
     try:
         store.reload_if_stale()
+        total = len(store.items)
         state = {"question": question, "history": history, "filters": filters}
         final: dict = {}
         for update in graph.stream(state, stream_mode="updates"):
-            for delta in update.values():
+            for node, delta in update.items():
                 trace += delta.get("trace", [])
+                steps.append(step_of(node, delta))
                 final.update(delta)
-                yield {"trace": list(trace)}
-        yield {"answer": final.get("answer") or "No answer was produced — please try again.",
-               "references": final.get("references", []), "trace": list(trace)}
+                yield {"total": total, "steps": list(steps), "trace": list(trace)}
+        yield {"total": total, "steps": list(steps), "trace": list(trace),
+               "answer": final.get("answer") or "No answer was produced. Please ask again.",
+               "references": final.get("references", [])}
     except Exception as e:  # report instead of raising across the fork
         log.exception("assistant failed")
-        yield {"error": f"{type(e).__name__}: {e}"[:500], "trace": list(trace)}
-
-
-def _trace_md(trace: list[str]) -> str:
-    return "\n\n".join(f"{i}. {t}" for i, t in enumerate(trace, 1))
+        yield {"error": f"{type(e).__name__}: {e}"[:500], "total": total, "steps": list(steps),
+               "trace": list(trace)}
 
 
 def error_message(err: str) -> str:
     if "quota" in err.lower():
-        return ("⚠️ The free ZeroGPU quota for this visitor is used up.\n\n"
-                f"`{err}`\n\nLog in to huggingface.co (free accounts get more GPU time) or try again later. "
-                "Keyword Search and Latest keep working without a GPU.")
-    return (f"⚠️ The assistant hit an error: `{err}`\n\n"
-            "Please try again in a moment. Keyword Search still works meanwhile.")
+        return ("**The free GPU time for this visitor is used up.** Log in to huggingface.co for more GPU "
+                "time, or try again later. Search and Latest keep working without a GPU.\n\n"
+                f"Details: `{err}`")
+    return (f"**The assistant stopped with an error.** Ask again in a moment; Search still works.\n\n"
+            f"Details: `{err}`")
+
+
+def _earlier(history: list) -> list[tuple[str, str]]:
+    """(question, answer) pairs from the conversation state."""
+    pairs, q = [], None
+    for m in history or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "user":
+            q = message_text(m.get("content"))
+        elif m.get("role") == "assistant" and q is not None:
+            pairs.append((q, message_text(m.get("content"))))
+            q = None
+    return pairs
 
 
 def render(events: Iterable[dict], history: list, question: str) -> Iterator[tuple]:
-    """Turn assistant events into the UI outputs (chat, references_md, trace_md, cleared_textbox, state).
-    The chat list is returned twice: once for the Chatbot, once to store in the conversation gr.State."""
+    """Turn assistant events into the UI outputs: (answer_md, reading_list_html, sieve_html,
+    cleared_textbox, conversation_state)."""
+    earlier = _earlier(history)
     base = list(history or []) + [{"role": "user", "content": question}]
 
-    def chat(text: str) -> list:
-        return base + [{"role": "assistant", "content": text}]
+    def out(body: str, refs_html: str, sieve: str, final: bool = False) -> tuple:
+        conv = base + [{"role": "assistant", "content": body}] if final else list(history or [])
+        return answer_md(question, body, earlier), refs_html, sieve, "", conv
 
-    def out(text: str, refs: str, trace: str) -> tuple:
-        c = chat(text)
-        return c, refs, trace, "", c
-
-    yield out(WORKING, "_Searching…_", "")
+    yield out(f"_{WORKING}_", "", "")
     for ev in events:
-        trace = _trace_md(ev.get("trace", []))
+        total, steps, trace = ev.get("total", 0), ev.get("steps", []), ev.get("trace", [])
         if "error" in ev:
-            yield out(error_message(ev["error"]), "_No references (the request failed)._", trace)
+            yield out(error_message(ev["error"]), "", sieve_html(total, steps, trace), final=True)
             return
         if "answer" in ev:
-            yield out(ev["answer"], format_references(ev["references"]), trace)
+            yield out(ev["answer"], reading_list_html(ev["references"]), sieve_html(total, steps, trace), final=True)
             return
-        last = ev["trace"][-1] if ev.get("trace") else ""
-        yield out(f"⏳ {last.split('→')[0].replace('**', '').strip()} done, working…", "_Searching…_", trace)
+        yield out("_Working through the collection…_", "", sieve_html(total, steps, trace, working=True))
