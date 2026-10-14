@@ -100,7 +100,8 @@ CSS = """
 .nv-answer .nv-prose p, .nv-answer .nv-prose li { font-family:var(--serif) !important; font-size:17px !important;
   line-height:1.55 !important; }
 .nv-answer > .nv-hint, .nv-answer .nv-hint { font-family:var(--serif); font-size:17px !important; }
-.nv-reset button { border:1px solid var(--rule) !important; padding:6px 14px !important; font-size:13px; }
+button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; padding:6px 14px !important;
+  font-size:13px; }
 .nv-answer h3 { font-family:var(--serif); font-weight:500; font-size:27px; line-height:1.2; margin:0 0 12px; }
 .nv-answer h2, .nv-answer h4 { font-family:var(--serif); font-weight:600; font-size:21px; }
 .nv-answer details { margin-top:24px; font-size:15px; color:var(--graphite); }
