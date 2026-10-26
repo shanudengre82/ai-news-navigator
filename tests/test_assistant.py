@@ -129,3 +129,28 @@ def test_references_show_match_scores_and_warn_on_low_matches():
     assert "Only 1 reference matched your question well. 2 more with low match scores are shown" in html
     assert "nv-warn" not in references_html(refs[:1])
     assert "No reference matched your question well" in references_html(refs[1:])
+
+
+def test_latest_groups_the_last_10_days_by_date():
+    from datetime import date
+
+    from ai_news.schema import NewsItem
+    from ai_news.ui import day_groups, latest_day_html, latest_html
+
+    def item(n, day, upvotes=0, kind="paper"):
+        return NewsItem(title=f"Item {n}", summary="s", source="arXiv", source_type=kind,
+                        published=f"2026-10-{day:02d}T0{n % 10}:00:00+00:00", url=f"https://x/{n}", upvotes=upvotes)
+
+    items = [item(1, 26), item(2, 25, upvotes=3), item(3, 25, kind="blog"), item(4, 25), item(5, 17), item(6, 16)]
+    groups = day_groups(items, today=date(2026, 10, 26))
+    assert [d.day for d, _ in groups] == [26, 25, 17]  # newest first, 16 Oct is 11 days back, empty days skipped
+    assert [it.title for it in groups[1][1]] == ["Item 2", "Item 4", "Item 3"]  # most upvoted, then newest
+
+    page = latest_html(groups, per_day=2)
+    assert "Monday 26 Oct 2026" in page and "Sunday 25 Oct 2026" in page
+    assert "2 papers, 1 blog post" in page and "Showing the top 2 of 3" in page
+    assert page.count('class="nv-item"') == 4
+    assert "Nothing new in the last 10 days" in latest_html([], 10)
+
+    one = latest_day_html(*groups[1], shown=2)
+    assert one.count('class="nv-item"') == 2 and "Showing 2 of 3" in one

@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -197,6 +197,14 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
   padding:0; border-radius:2px; }
 .nv-kind { display:inline-block; width:.9em; text-align:center; margin-right:4px; color:var(--graphite); }
 
+/* latest, by day */
+.nv-day { margin-top:28px; }
+.nv-day:first-of-type { margin-top:8px; }
+.nv-day h2 { font-family:var(--serif); font-weight:500; font-size:21px; margin:0; padding-top:12px;
+  color:var(--ink); border-top:2px solid var(--ink); }
+.nv-day .nv-count { font-size:13px; margin:2px 0 4px; }
+.nv-day .more { font-size:13px; color:var(--graphite); margin:10px 0 0; }
+
 /* sources table */
 .nv-sources table { border-collapse:collapse; font-size:15px; max-width:760px; width:100%; }
 .nv-sources th { text-align:left; font-weight:600; color:var(--graphite); padding:6px 12px 6px 0; }
@@ -331,6 +339,64 @@ def rows(items: list[NewsItem], query: str = "", count_line: str = "") -> str:
                 'or clear the source filter.</p></div>')
     head = f'<p class="nv-count">{count_line}</p>' if count_line else ""
     return f'<div class="nv-rows">{head}{"".join(row(it, query) for it in items)}</div>'
+
+
+# ---------------------------------------------------------------- latest, by day
+LATEST_DAYS = 10
+DAY_PAGE = 50
+ALL_DAYS = "all"
+
+
+def day_groups(items: list[NewsItem], today: date | None = None) -> list[tuple[date, list[NewsItem]]]:
+    """Items from the last LATEST_DAYS calendar days (UTC, today included), newest day first. Within a day the
+    most upvoted come first, so Daily Papers picks and lab posts sit above the 0-upvote arXiv flood."""
+    today = today or datetime.now(timezone.utc).date()
+    first = today - timedelta(days=LATEST_DAYS - 1)
+    days: dict[date, list[NewsItem]] = {}
+    for it in items:
+        try:
+            d = parse_iso(it.published).astimezone(timezone.utc).date()
+        except Exception:
+            continue
+        if first <= d <= today:
+            days.setdefault(d, []).append(it)
+    for day in days.values():
+        day.sort(key=lambda it: (it.upvotes, it.published), reverse=True)
+    return sorted(days.items(), reverse=True)
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n:,} {word}{'s' if n != 1 else ''}"
+
+
+def day_heading(d: date, items: list[NewsItem]) -> str:
+    papers = sum(it.source_type == "paper" for it in items)
+    parts = [_plural(papers, "paper") if papers else "", _plural(len(items) - papers, "blog post")
+             if len(items) > papers else ""]
+    return (f'<h2>{d.strftime("%A %-d %b %Y")}</h2>'
+            f'<p class="nv-count">{", ".join(p for p in parts if p)}</p>')
+
+
+def latest_html(groups: list[tuple[date, list[NewsItem]]], per_day: int) -> str:
+    if not groups:
+        return f'<div class="nv-rows"><p class="empty">Nothing new in the last {LATEST_DAYS} days.</p></div>'
+    total = sum(len(g) for _, g in groups)
+    out = [f'<p class="nv-count">{total:,} papers and posts from the last {LATEST_DAYS} days, grouped by the day '
+           f'they were published. Most upvoted first.</p>']
+    for d, items in groups:
+        more = (f'<p class="more">Showing the top {per_day} of {len(items):,}. Pick this day under Day to see '
+                f'them all.</p>' if len(items) > per_day else "")
+        out.append(f'<section class="nv-day">{day_heading(d, items)}'
+                   f'{"".join(row(it) for it in items[:per_day])}{more}</section>')
+    return f'<div class="nv-rows">{"".join(out)}</div>'
+
+
+def latest_day_html(d: date, items: list[NewsItem], shown: int) -> str:
+    if not items:
+        return '<div class="nv-rows"><p class="empty">Nothing from this day matches the filters.</p></div>'
+    note = f'<p class="more">Showing {min(shown, len(items)):,} of {len(items):,}.</p>'
+    return (f'<div class="nv-rows"><section class="nv-day">{day_heading(d, items)}'
+            f'{"".join(row(it) for it in items[:shown])}{note}</section></div>')
 
 
 # ---------------------------------------------------------------- assistant outputs
@@ -552,10 +618,40 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
     def refine_more(results, sort, source_type, window, sources, shown):
         return refine(results, sort, source_type, window, sources, int(shown or 0) + REF_PAGE)
 
-    def latest(sources: list[str], source_type: str, n: float) -> str:
-        """The newest items in the collection, optionally filtered by source and type."""
-        hits = keyword_search(store, "", sources or None, source_type, None, "date", int(n))
-        return rows([h[0] for h in hits])
+    def latest_groups(sources, source_type):
+        # one extra day: keyword_search's window is rolling, day_groups cuts at calendar days
+        hits = keyword_search(store, "", sources or None, source_type, LATEST_DAYS + 1, "date")
+        return day_groups([h[0] for h in hits])
+
+    def latest(sources: list[str], source_type: str, day: str = ALL_DAYS, per_day: float = 10) -> str:
+        """Papers and posts from the last 10 days, grouped by publication date (UTC), most upvoted first.
+
+        Args:
+            sources: source names to keep; empty means all
+            source_type: "any", "paper" or "blog"
+            day: "all" for every day (top `per_day` each), or one date as YYYY-MM-DD for that whole day
+            per_day: how many items to show under each date when day is "all"
+        """
+        return latest_page(sources, source_type, day, per_day, DAY_PAGE)[0]
+
+    def latest_page(sources, source_type, day, per_day, shown) -> tuple[str, int]:
+        groups = latest_groups(sources, source_type)
+        if not day or day == ALL_DAYS:
+            return latest_html(groups, int(per_day)), 0
+        items = next((g for d, g in groups if d.isoformat() == day), [])
+        return latest_day_html(date.fromisoformat(day), items, int(shown)), len(items)
+
+    def latest_more(sources, source_type, day, per_day, shown):
+        shown = int(shown or 0) + DAY_PAGE
+        out, n = latest_page(sources, source_type, day, per_day, shown)
+        return out, shown, gr.update(visible=n > shown)
+
+    def latest_reset(sources, source_type, day, per_day):
+        return DAY_PAGE, gr.update(visible=latest_page(sources, source_type, day, per_day, DAY_PAGE)[1] > DAY_PAGE)
+
+    def latest_days():
+        days = [(f'{d.strftime("%a %-d %b")} ({len(g):,})', d.isoformat()) for d, g in latest_groups(None, "any")]
+        return gr.update(choices=[(f"All {LATEST_DAYS} days", ALL_DAYS)] + days, value=ALL_DAYS)
 
     def status() -> str:
         """Collection size, last update time and the health of each source."""
@@ -654,22 +750,32 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 with gr.Row(elem_classes="nv-filters"):
                     l_sources = gr.Dropdown(source_names, multiselect=True, label="Sources", info="Empty means all")
                     l_type = gr.Radio(TYPE_CHOICES, value="any", label="Type")
-                    l_n = gr.Slider(10, 200, value=50, step=10, label="How many")
+                    l_day = gr.Dropdown([(f"All {LATEST_DAYS} days", ALL_DAYS)], value=ALL_DAYS, label="Day",
+                                        info="Pick a day to see all of it")
+                    l_per = gr.Slider(5, 50, value=10, step=5, label="Per day", info=f"With All {LATEST_DAYS} days")
                 feed = gr.HTML()
-                for comp in (l_sources, l_type, l_n):
-                    comp.change(latest, [l_sources, l_type, l_n], feed, api_visibility="private")
+                l_more = gr.Button("Show more from this day", size="sm", variant="secondary", visible=False,
+                                   elem_classes="nv-more")
+                l_shown = gr.State(DAY_PAGE)
+                l_inputs = [l_sources, l_type, l_day, l_per]
+                for comp in l_inputs:
+                    comp.change(latest, l_inputs, feed, api_visibility="private").then(
+                        latest_reset, l_inputs, [l_shown, l_more], api_visibility="private")
+                l_more.click(latest_more, l_inputs + [l_shown], [feed, l_shown, l_more], api_visibility="private")
 
             with gr.Tab("Sources"):
                 stat = gr.HTML()
                 btn = gr.Button("Download the latest copy" if pull_mode else "Collect new items now",
                                 variant="secondary", size="sm")
                 out = gr.HTML()
-                btn.click(refresh_now, None, [out, stat, masthead])
+                btn.click(refresh_now, None, [out, stat, masthead]).then(
+                    latest_days, None, l_day, api_visibility="private")
 
             with gr.Tab("About"):
                 gr.Markdown(ABOUT_MD, elem_classes="nv-about")
 
-        demo.load(latest, [l_sources, l_type, l_n], feed, api_name="latest_feed")
+        demo.load(latest_days, None, l_day, api_visibility="private")
+        demo.load(latest, l_inputs, feed, api_name="latest_feed")
         demo.load(status, None, stat, api_name="status")
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
     return demo

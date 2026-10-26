@@ -24,7 +24,7 @@ Keep up with AI research without paying for anything. The app collects new paper
 
 - **Ask**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). You get an overall summary with citations, then every matching reference (not a fixed top-N), each with a short summary; sort and filter the list afterwards by relevance, date, upvotes, type or source. A live *sieve* on the right shows how the collection was narrowed at each step: pulled, reranked, reviewed, listed.
 - **Search**: BM25 keyword search over every match (50 at a time) with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
-- **Latest**: the newest papers and posts, filtered by source and type.
+- **Latest**: the last 10 days of papers and posts, grouped by date with the most upvoted first. Pick a day to see all of it.
 
 ## Sources (all free and open; edit `config/sources.yaml`)
 | Kind | Sources |
