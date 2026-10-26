@@ -114,3 +114,18 @@ def test_quota_errors_get_a_friendly_hint():
     from ai_news.assistant import error_message
     msg = error_message("Error: 'You have exceeded your ZeroGPU quota (180s requested vs. 179s left).'")
     assert "Log in" in msg and "quota" in msg
+
+
+def test_references_show_match_scores_and_warn_on_low_matches():
+    from ai_news.ui import references_html
+    base = {"url": "https://x/1", "source": "arXiv", "source_type": "paper",
+            "published": "2026-10-01T00:00:00+00:00", "summary": "s"}
+    refs = [{**base, "title": "Good", "relevance": 0.87},
+            {**base, "title": "Close", "relevance": 0.012, "weak": True},
+            {**base, "title": "Off", "relevance": 0.001, "weak": True, "rejected": True}]
+    html = references_html(refs)
+    assert "Match 87%" in html and "Low match 1%" in html and "Low match &lt;1%" not in html
+    assert "Low match <1% · the model judged it off-topic" in html
+    assert "Only 1 reference matched your question well. 2 more with low match scores are shown" in html
+    assert "nv-warn" not in references_html(refs[:1])
+    assert "No reference matched your question well" in references_html(refs[1:])

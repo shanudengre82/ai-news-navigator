@@ -53,12 +53,15 @@ Hugging Face dataset for storage and GitHub Actions for the daily collection. No
 3. **Rerank.** A cross-encoder (bge-reranker-base) reads the question and each candidate together and scores
    how well they match. Every item above a relevance threshold is kept, so a broad question can return a
    hundred matches and a narrow one a handful. Recent items and Hugging Face upvotes get a small boost.
+   Each reference shows its **match %**: the reranker's estimate that it is relevant to your question.
 4. **Review.** The LLM reads the 10 best matches, drops any that are off-topic and writes a short summary
    of each one it keeps.
 5. **Try again if needed.** If fewer than 3 items pass the review, the LLM rewords the search and steps 2–4
    repeat (only new items are reviewed). If that still isn't enough, the app searches arXiv live.
 6. **Answer.** The LLM writes an overall summary from the reviewed items and cites them as [1], [2] and so
    on. Below it comes every match: reviewed items with the model's summary, the rest with their abstract.
+   You always get at least 5 references: if fewer match, the closest low-scoring items fill the list,
+   marked "Low match" under a warning, so a weak result is never presented as a strong one.
    The list is built straight from the collection, so its titles and links can't be made up.
 
 On the Ask tab your question and the list's filters sit on the left, the results in the center and the

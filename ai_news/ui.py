@@ -181,6 +181,11 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
   margin-right:6px; color:var(--kept); }
 .nv-refs .d.ab .lbl { color:var(--graphite); }
 .nv-refs .empty, .nv-rows .empty { color:var(--graphite); font-size:15px; }
+.nv-score { display:inline-block; margin-left:10px; padding:0 6px; border-radius:3px; font-weight:600;
+  font-variant-numeric:tabular-nums; color:var(--kept); background:color-mix(in srgb, var(--kept) 12%, transparent); }
+.nv-score.low { color:var(--ink); font-weight:500; background:transparent; border:1.5px solid var(--dropped); }
+.nv-warn { margin:0 0 10px; padding:8px 12px; font-size:15px; line-height:1.5; color:var(--ink);
+  border-left:3px solid var(--dropped); background:color-mix(in srgb, var(--dropped) 9%, transparent); }
 
 /* result rows (search, latest) */
 .nv-rows { max-width:860px; }
@@ -351,6 +356,21 @@ def view_refs(refs: list[Candidate], sort: str = "relevance", source_type: str =
     return out
 
 
+def _pct(rel: float) -> str:
+    return "<1%" if rel < 0.005 else f"{round(rel * 100)}%"
+
+
+def _score_badge(c: Candidate) -> str:
+    """Match % = the cross-encoder's estimate that the item is relevant to the question."""
+    rel = c.get("relevance")
+    if c.get("weak"):
+        label = f"Low match {_pct(rel)}" if rel is not None else "Low match"
+        if c.get("rejected"):
+            label += " · the model judged it off-topic"
+        return f'<span class="nv-score low">{label}</span>'
+    return f'<span class="nv-score">Match {_pct(rel)}</span>' if rel is not None else ""
+
+
 def _ref_item(n: int, c: Candidate) -> str:
     if c.get("digest"):
         body = f'<p class="d"><span class="lbl">Model summary</span>{html.escape(c["digest"])}</p>'
@@ -360,7 +380,7 @@ def _ref_item(n: int, c: Candidate) -> str:
         body = f'<p class="d ab"><span class="lbl">From the abstract</span>{html.escape(text)}</p>' if text else ""
     return (f'<li id="nv-ref-{n}"><span class="n">[{n}]</span><div>'
             f'<a class="t" href="{html.escape(c["url"])}" target="_blank" rel="noopener">{html.escape(c["title"])}</a>'
-            f'{_meta(c["source"], c.get("source_type", "paper"), c["published"], c.get("upvotes", 0))}'
+            f'{_meta(c["source"], c.get("source_type", "paper"), c["published"], c.get("upvotes", 0), _score_badge(c))}'
             f'{body}</div></li>')
 
 
@@ -380,9 +400,27 @@ def references_html(refs: list[Candidate], sort: str = "relevance", source_type:
             head += f" ({hidden} cited in the summary {'is' if hidden == 1 else 'are'} hidden)"
     if len(view) > shown:
         head += f" · showing {shown:,}"
+    if any(c.get("relevance") is not None for c in refs):
+        head += " · match % is how relevant the reranker judges each one to your question"
     items = "".join(_ref_item(n, c) for n, c in view[:shown])
     body = f"<ol>{items}</ol>" if items else '<p class="empty">No reference matches these filters.</p>'
-    return f'<section class="nv-refs"><h2>References</h2><p class="nv-count">{head}</p>{body}</section>'
+    return (f'<section class="nv-refs"><h2>References</h2><p class="nv-count">{head}</p>{weak_warning(refs)}'
+            f'{body}</section>')
+
+
+def weak_warning(refs: list[Candidate]) -> str:
+    weak = sum(1 for c in refs if c.get("weak"))
+    if not weak:
+        return ""
+    strong = len(refs) - weak
+    if strong:
+        text = (f"Only {strong} reference{' matched' if strong == 1 else 's matched'} your question well. "
+                f"{weak} more with low match scores {'is' if weak == 1 else 'are'} shown so you have at least "
+                f"{len(refs)}; treat {'it' if weak == 1 else 'them'} as leads, not answers.")
+    else:
+        text = (f"No reference matched your question well. These {weak} are the closest, with low match scores; "
+                "treat them as leads, not answers. Try other words or a broader question.")
+    return f'<p class="nv-warn" role="note">{text}</p>'
 
 
 def has_more(refs: list[Candidate], shown: int, sort: str = "relevance", source_type: str = "any",
@@ -393,6 +431,8 @@ def has_more(refs: list[Candidate], shown: int, sort: str = "relevance", source_
 # kept for callers that want markdown (e.g. MCP clients reading the API output)
 def format_references(refs: list[Candidate]) -> str:
     return "\n\n".join(f"[{n}] [{c['title']}]({c['url']}) ({c['source']}, {human_date(c['published'])})"
+                       + (f", match {_pct(c['relevance'])}" if c.get("relevance") is not None else "")
+                       + (" (low match)" if c.get("weak") else "")
                        + (f"\n{c['digest']}" if c.get("digest") else "") for n, c in enumerate(refs, 1))
 
 

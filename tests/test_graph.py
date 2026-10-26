@@ -27,7 +27,9 @@ def test_enough_relevant_goes_straight_to_generate(store):
                                        grade(8, {1, 2, 3}), "Answer citing [1]."])
     out = build_graph(RagNodes(llm, store)).invoke({"question": "test-time compute"})
     assert out["answer"] == "Answer citing [1]."
-    assert len(out["references"]) == 3
+    refs = out["references"]
+    assert len(refs) == 5 and not any(r.get("weak") for r in refs[:3])   # 3 relevant + 2 padded to reach 5
+    assert all(r["weak"] and r["rejected"] for r in refs[3:])
     steps = [t.split("**")[1] for t in out["trace"]]
     assert steps == ["Analyze", "Retrieve", "Rerank", "Grade", "Generate"]
 
@@ -45,7 +47,10 @@ def test_few_relevant_rewrites_then_live_searches(store):
                      "Live arXiv search", "Rerank", "Grade", "Generate"]
     assert live[0].id in store.items                       # live results grow the corpus
     assert out["answer"] == "MoE answer [1]."
-    assert [r["title"] for r in out["references"]] == ["Mixture of experts routing"]
+    refs = out["references"]
+    assert refs[0]["title"] == "Mixture of experts routing" and not refs[0].get("weak")
+    assert len(refs) == 5 and all(r["weak"] and r["rejected"] for r in refs[1:])   # padded, flagged
+    assert out["summarized"] == 1                                    # the summary uses only the real match
 
 
 def test_references_are_every_match_reviewed_first(store, monkeypatch):
@@ -64,3 +69,15 @@ def test_ui_filters_restrict_retrieval(store):
     nodes = RagNodes(llm, store)
     out = build_graph(nodes).invoke({"question": "model", "filters": {"source_type": "blog"}})
     assert all(c["source_type"] == "blog" for c in out["candidates"])
+
+
+def test_reranker_scores_become_match_scores_and_low_ones_pad(store):
+    class Scores:  # one strong match, the rest far below MIN_RELEVANCE
+        def score(self, query, passages):
+            return [0.9 if p.startswith("Test-time") else 0.001 for p in passages]
+
+    llm = FakeListChatModel(responses=[analyze(["compute"]), grade(5, {1}), "Answer [1]."])
+    out = build_graph(RagNodes(llm, store, reranker=Scores())).invoke({"question": "test-time compute"})
+    refs = out["references"]
+    assert refs[0]["title"].startswith("Test-time") and refs[0]["relevance"] == 0.9 and not refs[0].get("weak")
+    assert len(refs) == 5 and all(r["weak"] and r["relevance"] == 0.001 for r in refs[1:])

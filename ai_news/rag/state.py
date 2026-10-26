@@ -16,7 +16,10 @@ class Candidate(TypedDict, total=False):
     summary: str
     upvotes: int
     score: float
+    relevance: float            # the cross-encoder's probability that the item is relevant (0-1)
     digest: str                 # the LLM's short summary of the item, for the items it reviewed
+    weak: bool                  # a low match, listed only to reach MIN_RESULTS
+    rejected: bool              # the LLM judged it off-topic
 
 
 class GraphState(TypedDict, total=False):
@@ -29,6 +32,7 @@ class GraphState(TypedDict, total=False):
     days: int | None
     candidates: list[Candidate]  # the retrieval pool of the latest retrieve / live search
     matches: list[Candidate]     # everything the reranker kept, across rewrites, best first
+    ranked: list[Candidate]      # the best-scored items of every pool, kept or not (to pad the results)
     verdicts: dict               # id -> {"relevant": bool, "digest": str} for items the LLM reviewed
     relevant: list[Candidate]
     retries: int

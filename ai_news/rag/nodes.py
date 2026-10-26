@@ -29,6 +29,8 @@ MIN_RELEVANCE = 0.02    # reranker probability to count as a match; bge-reranker
                         # as low as 0.02, so this favours recall (tuned on the real corpus, Oct 2026)
 MIN_KEEP = 5            # keep at least this many matches so the LLM has something to judge
 GRADE_TOP = 10          # the LLM reviews and summarizes this many new matches per grading pass
+MIN_RESULTS = 5         # always list at least this many references, flagging low matches as weak
+RANKED_KEEP = 50        # scored items remembered for padding
 
 
 def extract_json(text: str) -> Any:
@@ -130,18 +132,23 @@ class RagNodes:
             scores = self.reranker.score(state["question"], [f"{c['title']}. {c['summary'][:1000]}" for c in cands])
             rels = [min(max(s, 0.0), 1.0) for s in scores]  # Reranker.score returns probabilities
             for c, rel in zip(cands, rels):
+                c["relevance"] = rel
                 # multiplicative, so recency and upvotes only reorder items of similar relevance
                 c["score"] = rel * (1 + 0.25 * recency_boost(c["published"]) + 0.05 * math.log1p(c.get("upvotes", 0)))
             by_rel = sorted(zip(rels, cands), key=lambda p: p[0], reverse=True)
             kept = [c for r, c in by_rel if r >= MIN_RELEVANCE]
             if len(kept) < MIN_KEEP:
                 kept = [c for _, c in by_rel[:MIN_KEEP]]
+        ranked = {c["id"]: c for c in state.get("ranked", [])}
+        ranked.update({c["id"]: c for c in cands})
+        ranked = sorted(ranked.values(), key=lambda c: (c.get("relevance", 0), c.get("score", 0)),
+                        reverse=True)[:RANKED_KEEP]
         verdicts = state.get("verdicts") or {}
         merged = {c["id"]: c for c in state.get("matches", [])}
         merged.update({c["id"]: {**merged.get(c["id"], {}), **c} for c in kept})
         matches = sorted((c for c in merged.values() if verdicts.get(c["id"], {}).get("relevant", True)),
                          key=lambda c: c.get("score", 0), reverse=True)
-        return {"matches": matches,
+        return {"matches": matches, "ranked": ranked,
                 "trace": [f"**Rerank** (cross-encoder, relevance ≥ {MIN_RELEVANCE}, × recency/upvotes) → "
                           f"{len(kept)} of {len(cands)} kept, {len(matches)} matches in total"]}
 
@@ -207,13 +214,25 @@ class RagNodes:
                 "trace": [f"**Live arXiv search** for '{q}' → {len(found)} papers"]}
 
     def generate(self, state: GraphState) -> dict:
-        """Summary from the best reviewed matches; references are every match, reviewed ones first.
-        Citation numbers [n] are positions in that reference list."""
+        """Summary from the best reviewed matches; references are every match, reviewed ones first, topped up
+        to MIN_RESULTS with the closest low matches (flagged weak). Citation numbers [n] are positions in
+        that reference list."""
+        verdicts = state.get("verdicts") or {}
         relevant = sorted(state.get("relevant") or [], key=lambda c: c.get("score", 0), reverse=True)
         seen = {c["id"] for c in relevant}
-        rest = [c for c in state.get("matches", []) if c["id"] not in seen] or \
-            ([] if relevant else state.get("candidates", [])[:MIN_KEEP])
-        refs = [{**c, "summary": c["summary"][:700]} for c in relevant + rest]
+        rest = [{**c, "weak": c.get("relevance", 1.0) < MIN_RELEVANCE}
+                for c in state.get("matches", []) if c["id"] not in seen]
+        refs = relevant + rest
+        n_pad = 0
+        if len(refs) < MIN_RESULTS:
+            listed = {c["id"] for c in refs}
+            spare = [c for c in (state.get("ranked") or state.get("candidates", [])) if c["id"] not in listed]
+            spare.sort(key=lambda c: verdicts.get(c["id"], {}).get("relevant") is False)  # not rejected first
+            pad = [{**c, "weak": True, "rejected": verdicts.get(c["id"], {}).get("relevant") is False}
+                   for c in spare[:MIN_RESULTS - len(refs)]]
+            n_pad = len(pad)
+            refs += pad
+        refs = [{**c, "summary": c["summary"][:700]} for c in refs]
         if not refs:
             return {"answer": "I couldn't find anything in the corpus or on arXiv for this request. "
                               "Try broader terms.",
@@ -222,5 +241,6 @@ class RagNodes:
         answer = self._ask(prompts.GENERATE.format(question=state["question"], docs=format_docs(used, 700)))
         if not relevant:
             answer = "_No result passed the relevance check; these are the closest matches._\n\n" + answer
+        padded = f" ({len(refs) - n_pad} + {n_pad} low-match to reach {MIN_RESULTS})" if n_pad else ""
         return {"answer": answer, "references": refs, "summarized": len(used),
-                "trace": [f"**Generate** → summary from {len(used)} sources, {len(refs)} references"]}
+                "trace": [f"**Generate** → summary from {len(used)} sources, {len(refs)} references{padded}"]}
