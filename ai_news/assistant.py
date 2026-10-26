@@ -11,7 +11,7 @@ import logging
 from typing import Any, Iterable, Iterator
 
 from ai_news.store import CorpusStore
-from ai_news.ui import answer_md, reading_list_html, sieve_html
+from ai_news.ui import REF_PAGE, answer_md, references_html, sieve_html
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +31,16 @@ def message_text(content: Any) -> str:
     return str(content)
 
 
-COUNT_FIELD = {"retrieve": "candidates", "rerank": "candidates", "live_search": "candidates",
+COUNT_FIELD = {"retrieve": "candidates", "rerank": "matches", "live_search": "candidates",
                "grade_documents": "relevant", "rewrite_query": "queries", "generate": "references"}
 
 
 def step_of(node: str, delta: dict) -> dict:
     field = COUNT_FIELD.get(node)
-    return {"node": node, "count": len(delta.get(field) or []) if field else None}
+    step = {"node": node, "count": len(delta.get(field) or []) if field else None}
+    if delta.get("summarized"):
+        step["summarized"] = delta["summarized"]
+    return step
 
 
 def run_events(graph, store: CorpusStore, question: str, history: list[str], filters: dict) -> Iterator[dict]:
@@ -59,7 +62,7 @@ def run_events(graph, store: CorpusStore, question: str, history: list[str], fil
                 yield {"total": total, "steps": list(steps), "trace": list(trace)}
         yield {"total": total, "steps": list(steps), "trace": list(trace),
                "answer": final.get("answer") or "No answer was produced. Please ask again.",
-               "references": final.get("references", [])}
+               "references": final.get("references", []), "summarized": final.get("summarized", 0)}
     except Exception as e:  # report instead of raising across the fork
         log.exception("assistant failed")
         yield {"error": f"{type(e).__name__}: {e}"[:500], "total": total, "steps": list(steps),
@@ -89,23 +92,36 @@ def _earlier(history: list) -> list[tuple[str, str]]:
     return pairs
 
 
-def render(events: Iterable[dict], history: list, question: str) -> Iterator[tuple]:
-    """Turn assistant events into the UI outputs: (answer_md, reading_list_html, sieve_html,
-    cleared_textbox, conversation_state)."""
+def summary_note(refs: list, summarized: int) -> str:
+    if not refs:
+        return ""
+    if summarized >= len(refs):
+        return f"Summary of all {len(refs)} reference{'s' if len(refs) != 1 else ''}"
+    return f"Summary of the {summarized} most relevant of {len(refs):,} references"
+
+
+def render(events: Iterable[dict], history: list, question: str, view: dict | None = None) -> Iterator[tuple]:
+    """Turn assistant events into the UI outputs: (summary_md, references_html, steps_html, cleared_textbox,
+    conversation_state, results_state, shown_state). `view` holds the list's sort and filters."""
+    view = view or {}
     earlier = _earlier(history)
     base = list(history or []) + [{"role": "user", "content": question}]
 
-    def out(body: str, refs_html: str, sieve: str, final: bool = False) -> tuple:
+    def out(body: str, steps: str, final: bool = False, refs: list | None = None, summarized: int = 0) -> tuple:
         conv = base + [{"role": "assistant", "content": body}] if final else list(history or [])
-        return answer_md(question, body, earlier), refs_html, sieve, "", conv
+        refs = refs or []
+        return (answer_md(question, body, earlier, summary_note(refs, summarized)),
+                references_html(refs, shown=REF_PAGE, summarized=summarized, **view), steps, "", conv,
+                {"refs": refs, "summarized": summarized}, REF_PAGE)
 
-    yield out(f"_{WORKING}_", "", "")
+    yield out(f"_{WORKING}_", sieve_html(0, []))
     for ev in events:
         total, steps, trace = ev.get("total", 0), ev.get("steps", []), ev.get("trace", [])
         if "error" in ev:
-            yield out(error_message(ev["error"]), "", sieve_html(total, steps, trace), final=True)
+            yield out(error_message(ev["error"]), sieve_html(total, steps, trace), final=True)
             return
         if "answer" in ev:
-            yield out(ev["answer"], reading_list_html(ev["references"]), sieve_html(total, steps, trace), final=True)
+            yield out(ev["answer"], sieve_html(total, steps, trace), final=True,
+                      refs=ev["references"], summarized=ev.get("summarized", 0))
             return
-        yield out("_Working through the collection…_", "", sieve_html(total, steps, trace, working=True))
+        yield out("_Working through the collection…_", sieve_html(total, steps, trace, working=True))

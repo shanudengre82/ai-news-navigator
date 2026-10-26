@@ -22,8 +22,8 @@ tags:
 
 Keep up with AI research without paying for anything. The app collects new papers and posts from open sources, then lets you search them in two ways:
 
-- **Ask**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). You get a short answer with citations and a "Read these first" list, with the reason for each pick. A live *sieve* shows how the collection was narrowed at each step: matched, reranked, judged relevant, used.
-- **Search**: BM25 keyword search with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
+- **Ask**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). You get an overall summary with citations, then every matching reference (not a fixed top-N), each with a short summary; sort and filter the list afterwards by relevance, date, upvotes, type or source. A live *sieve* on the right shows how the collection was narrowed at each step: pulled, reranked, reviewed, listed.
+- **Search**: BM25 keyword search over every match (50 at a time) with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
 - **Latest**: the newest papers and posts, filtered by source and type.
 
 ## Sources (all free and open; edit `config/sources.yaml`)
@@ -37,7 +37,8 @@ Keep up with AI research without paying for anything. The app collects new paper
 
 AI Research Navigator collects new AI papers and posts from free, open sources every day. It then helps you
 decide what to read. Search finds items by keyword. The assistant reads your question, searches the
-collection, checks which results are actually relevant and writes a short answer that cites them.
+collection, keeps everything that is relevant and writes a short summary that cites the best of it,
+followed by every matching reference.
 
 Everything here is open source and runs on free tiers: Hugging Face Spaces with ZeroGPU for the app, a
 Hugging Face dataset for storage and GitHub Actions for the daily collection. No paid API is involved.
@@ -47,26 +48,32 @@ Hugging Face dataset for storage and GitHub Actions for the daily collection. No
 1. **Understand the question.** The LLM (Qwen2.5-7B-Instruct) turns your question into one to three search
    queries. It also notes any time window ("this month") and whether you want papers or blog posts.
 2. **Find candidates.** Each query runs through two searches: keyword search (BM25) and meaning-based search
-   (FAISS over BGE embeddings). The two rankings are merged with Reciprocal Rank Fusion, and the top 30
-   items move on.
+   (FAISS over BGE embeddings). The two rankings are merged with Reciprocal Rank Fusion into a wide pool of
+   up to 300 items (a limit on compute, not on results).
 3. **Rerank.** A cross-encoder (bge-reranker-base) reads the question and each candidate together and scores
-   how well they match. A small boost for recent items and for Hugging Face upvotes is added. The top 8 are
-   kept.
-4. **Judge relevance.** The LLM reads those 8 and marks each one relevant or not, with a one-line reason.
-5. **Try again if needed.** If fewer than 3 items are relevant, the LLM rewords the search and steps 2–4
-   repeat. If that still isn't enough, the app searches arXiv live and adds what it finds.
-6. **Answer.** The LLM writes a short summary that cites only the relevant items, as [1], [2] and so on. The
-   reading list next to it is built straight from the collection, so its titles and links can't be made up.
+   how well they match. Every item above a relevance threshold is kept, so a broad question can return a
+   hundred matches and a narrow one a handful. Recent items and Hugging Face upvotes get a small boost.
+4. **Review.** The LLM reads the 10 best matches, drops any that are off-topic and writes a short summary
+   of each one it keeps.
+5. **Try again if needed.** If fewer than 3 items pass the review, the LLM rewords the search and steps 2–4
+   repeat (only new items are reviewed). If that still isn't enough, the app searches arXiv live.
+6. **Answer.** The LLM writes an overall summary from the reviewed items and cites them as [1], [2] and so
+   on. Below it comes every match: reviewed items with the model's summary, the rest with their abstract.
+   The list is built straight from the collection, so its titles and links can't be made up.
 
-The "sieve" on the Ask tab shows these steps with the real counts from your question.
+On the Ask tab your question and the list's filters sit on the left, the results in the center and the
+assistant's steps on the right. The steps panel (the "sieve") shows the real count at each step. Sort and
+filter the references afterwards (relevance, newest, oldest, most upvoted; type, date, source) without
+asking again; the [n] numbers stay attached to their items.
 
 ### Interface
 
 | Component | What it is | What it does in this project | Where |
 |---|---|---|---|
-| **Gradio** | A Python library for building web apps around ML models | Builds the whole interface: the tabs, inputs, answer pane, reading list and sieve. `gr.State` keeps the conversation per visitor without exposing it in the public API. Theme and CSS give the custom look. | `ai_news/ui.py`, `app.py` |
+| **Gradio** | A Python library for building web apps around ML models | Builds the whole interface: the tabs, the three-pane Ask desk, the reference list with its sort and filters, and the sieve. `gr.State` keeps the conversation per visitor without exposing it in the public API. Theme and CSS give the custom look. | `ai_news/ui.py`, `app.py` |
 | **Gradio MCP server** + **`mcp`** | Model Context Protocol support built into Gradio; `mcp` is the protocol library it needs | Exposes the search and assistant functions as tools that other AI agents, such as Claude or Cursor, can call. The tool descriptions come from the functions' docstrings. | `app.py` (`mcp_server=True`) |
-| **Google Fonts** (Newsreader, Hanken Grotesk) | Free web fonts | Newsreader, a serif made for screen reading, is used for titles, answers and the reading list. Hanken Grotesk is used for controls and metadata. | `ai_news/ui.py` |
+| **Google Fonts** (Newsreader, Hanken Grotesk) | Free web fonts | Newsreader, a serif made for screen reading, is used for titles, summaries and references. Hanken Grotesk is used for controls and metadata. | `ai_news/ui.py` |
+| **Iframe height reporter** | A small script in the page head (`FIT_JS`) | On huggingface.co the app runs inside an iframe that only grows when the app reports its height. Gradio's own reporter can stop growing after a few quick changes (a streaming answer, fonts loading), which left the page unable to scroll. The script measures the real content height and reports it whenever it changes. | `ai_news/ui.py`, `app.py` |
 
 ### Orchestration: LangChain and LangGraph
 
@@ -82,7 +89,7 @@ The "sieve" on the Ask tab shows these steps with the real counts from your ques
 |---|---|---|---|
 | **Qwen2.5-7B-Instruct** | A 7-billion-parameter open chat LLM from Alibaba's Qwen team | The "brain" of the assistant: it plans the searches, judges relevance, rewords searches and writes the cited answer. It returns structured JSON for the planning and judging steps. You can switch it with `LLM_MODEL_ID`, for example to Qwen2.5-3B on smaller GPUs. | `ai_news/llm.py`, `ai_news/rag/prompts.py` |
 | **BAAI/bge-small-en-v1.5** | A small (33M parameter) embedding model that turns text into 384-number vectors | Embeds every title + abstract, and every search query, for meaning-based search. It is small enough to run on CPU, so the background collection needs no GPU. Queries get BGE's recommended retrieval prefix. | `ai_news/llm.py` (`load_embeddings`) |
-| **BAAI/bge-reranker-base** | A cross-encoder that scores how well a passage answers a query | Reorders the 30 candidates by actually reading the question and each abstract together. This is more accurate than comparing vectors, so the best 8 rise to the top. | `ai_news/llm.py` (`Reranker`) |
+| **BAAI/bge-reranker-base** | A cross-encoder that scores how well a passage answers a query | Scores every candidate in the pool by actually reading the question and each abstract together. This is more accurate than comparing vectors; everything above the relevance threshold becomes a match. | `ai_news/llm.py` (`Reranker`) |
 | **Transformers** | Hugging Face's library for loading and running models | Loads Qwen and its tokenizer and runs text generation. | `ai_news/llm.py` |
 | **Accelerate** | Hugging Face's helper for placing models on devices | Used by transformers to load the large model efficiently onto the GPU. | (used by transformers) |
 | **PyTorch** (`torch`) | The deep-learning framework all three models run on | Runs the neural networks, on the GPU in the Space and on CPU for the embeddings. | (used by all models) |
@@ -95,7 +102,7 @@ The "sieve" on the Ask tab shows these steps with the real counts from your ques
 | **FAISS** (`faiss-cpu`) | Meta's library for fast similarity search over vectors | Stores one vector per item in an `IndexIDMap2(IndexFlatIP)`, which gives exact cosine similarity and lets items be added and removed by id. It finds the items closest in meaning to a query. The index is saved as `index.faiss` next to the data. | `ai_news/store.py` (`VectorIndex`) |
 | **`rank-bm25`** | An implementation of BM25, the classic keyword-ranking formula used by search engines | Powers the Search tab, and the keyword half of the assistant's search. It catches exact model names and acronyms that embeddings can blur. | `ai_news/store.py`, `ai_news/search.py`, `ai_news/text.py` |
 | **Reciprocal Rank Fusion** | A simple method for merging several rankings (score = sum of 1 / (60 + rank)) | Combines the BM25 and FAISS results into one candidate list without having to calibrate their very different scores. | `ai_news/rag/nodes.py` (`retrieve`) |
-| **Recency and popularity boost** | Our own scoring | After reranking, items get a little extra score for being recent (half-life of 30 days) and for Hugging Face upvotes, so fresh and widely discussed work comes first. | `ai_news/rag/nodes.py` (`rerank`) |
+| **Recency and popularity boost** | Our own scoring | After reranking, an item's relevance is scaled up a little for being recent (half-life of 30 days) and for Hugging Face upvotes, so among equally relevant items fresh and widely discussed work comes first. | `ai_news/rag/nodes.py` (`rerank`) |
 
 ### Data sources and ingestion
 

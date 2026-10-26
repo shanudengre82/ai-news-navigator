@@ -18,11 +18,10 @@ from ai_news.ingest import refresh, sync_from_hub  # noqa: E402
 from ai_news.llm import Reranker, load_chat_model, load_embeddings  # noqa: E402
 from ai_news.rag.graph import build_graph  # noqa: E402
 from ai_news.rag.nodes import RagNodes  # noqa: E402
-from ai_news.search import DATE_WINDOWS  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
 from ai_news import scheduler  # noqa: E402
 from ai_news.assistant import message_text, render, run_events  # noqa: E402
-from ai_news.ui import CSS, FONTS_HEAD, build_ui, theme  # noqa: E402
+from ai_news.ui import CSS, FIT_JS, FONTS_HEAD, REF_PAGE, STEPS_EMPTY, build_ui, theme  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -66,25 +65,31 @@ def _guarded(events):
         yield {"error": f"{type(e).__name__}: {e}"[:500]}
 
 
-def research_assistant(message: str, history: list, sources: list[str], source_type: str, window: str):
-    """Ask the AI research assistant. It searches the corpus (hybrid BM25 + vectors), reranks, has an LLM
-    judge relevance, rewrites the query or searches arXiv live if needed, and answers with cited references.
+def research_assistant(message: str, history: list, sources: list[str], source_type: str, window: str,
+                       sort: str = "relevance"):
+    """Ask the AI research assistant. It searches the corpus (hybrid BM25 + vectors), keeps every item a
+    cross-encoder finds relevant, has an LLM review and summarize the best ones, rewrites the query or searches
+    arXiv live if needed, and returns a cited summary followed by every matching reference.
 
     Args:
         message: the research question
         history: (internal, from gr.State — not part of the public API) previous chat messages
-        sources: restrict to these sources (empty = all)
-        source_type: "any", "paper" or "blog"
-        window: date window, e.g. "Any time", "Last week", "Last month"
+        sources: only list references from these sources (empty = all); does not narrow the search
+        source_type: "any", "paper" or "blog"; only narrows the reference list
+        window: only list references from this window, e.g. "Any time", "Last week", "Last month"
+        sort: order of the reference list: "relevance", "date", "oldest" or "upvotes"
     """
     history = history if isinstance(history, list) else []
     if not message or not message.strip():
-        yield "Type a question first, for example: *recent work on speculative decoding*.", "", "", "", history
+        yield ("Type a question first, for example: *recent work on speculative decoding*.", "", STEPS_EMPTY,
+               "", history, {}, REF_PAGE)
         return
     history_texts = [message_text(m.get("content")) for m in (history or [])
                      if isinstance(m, dict) and m.get("role") == "user"]
-    filters = {"sources": sources or None, "source_type": source_type, "days": DATE_WINDOWS.get(window)}
-    yield from render(_guarded(_assistant_gpu(message, history_texts, filters)), history, message)
+    # Filters narrow the list afterwards (see ui.refine), not the search: it finds everything that matches.
+    view = {"sort": sort or "relevance", "source_type": source_type or "any", "window": window or "Any time",
+            "sources": sources or None}
+    yield from render(_guarded(_assistant_gpu(message, history_texts, {})), history, message, view)
 
 
 demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh, pull_mode=settings.refresh_mode == "pull")
@@ -95,5 +100,6 @@ if settings.refresh_hours > 0:
 log.info("refresh mode: %s, every %s h", settings.refresh_mode, settings.refresh_hours)
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=2).launch(theme=theme(), css=CSS, head=FONTS_HEAD,
-                                                      mcp_server=True, show_error=True)
+    head = f"{FONTS_HEAD}<script>{FIT_JS}</script>"  # FIT_JS: lets the page scroll inside the Spaces iframe
+    demo.queue(default_concurrency_limit=2).launch(theme=theme(), css=CSS, head=head, mcp_server=True,
+                                                   show_error=True)

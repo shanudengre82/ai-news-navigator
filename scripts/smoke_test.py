@@ -26,7 +26,7 @@ def main(target: str) -> None:
     print(f"search: {len(urls)} links, e.g. {urls[:2]}")
     assert urls, "keyword search returned no links"
 
-    job = c.submit("What are recent approaches to improving LLM reasoning?", [], "any", "Any time",
+    job = c.submit("What are recent approaches to improving LLM reasoning?", [], "any", "Any time", "relevance",
                    api_name="/research_assistant")
     answer, refs, sieve, _ = job.result()
     assert "stopped with an error" not in answer and "GPU time" not in answer, f"assistant failed: {answer}"

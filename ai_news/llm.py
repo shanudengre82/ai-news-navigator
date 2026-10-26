@@ -48,9 +48,12 @@ class Reranker:
         self.model = CrossEncoder(model_id, device=device or _device(), max_length=512)
 
     def score(self, query: str, passages: list[str]) -> list[float]:
+        """Relevance probabilities in [0, 1]."""
+        import torch
         if not passages:
             return []
-        return [float(s) for s in self.model.predict([(query, p) for p in passages], batch_size=16)]
+        return [float(s) for s in self.model.predict([(query, p) for p in passages], batch_size=16,
+                                                     activation_fn=torch.nn.Sigmoid())]
 
 
 def load_embeddings(model_id: str):

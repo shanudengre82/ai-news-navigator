@@ -30,8 +30,9 @@ def passes_filters(it: NewsItem, sources: list[str] | None, source_type: str | N
 
 def keyword_search(store: CorpusStore, query: str, sources: list[str] | None = None,
                    source_type: str | None = None, days: int | None = None,
-                   sort: str = "relevance", limit: int = 50) -> list[tuple[NewsItem, float]]:
-    """BM25 over title+summary. Quoted phrases ("like this") must appear verbatim."""
+                   sort: str = "relevance", limit: int | None = None) -> list[tuple[NewsItem, float]]:
+    """BM25 over title+summary, every match (or the first `limit`). Quoted phrases ("like this") must
+    appear verbatim."""
     phrases = [p.lower() for p in re.findall(r'"([^"]+)"', query)]
     if query.strip():
         hits = store.bm25_scores(query.replace('"', " "))

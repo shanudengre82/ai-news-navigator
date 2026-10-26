@@ -83,3 +83,11 @@ def test_sync_from_hub_reloads_only_when_snapshot_changes(store, tmp_path):
     store.save()
     assert "Pulled new snapshot" in sync_from_hub(space)
     assert len(space.items) == len(store.items)
+
+
+def test_keyword_search_returns_every_match(tmp_path):
+    s = CorpusStore(tmp_path, DeterministicFakeEmbedding(size=8))
+    s.add([make_item(f"Speculative decoding variant {i}", "Faster LLM decoding.") for i in range(80)]
+          + [make_item("Unrelated", "Protein folding.")])
+    assert len(keyword_search(s, "speculative decoding")) == 80
+    assert len(keyword_search(s, "speculative decoding", limit=10)) == 10

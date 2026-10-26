@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -40,6 +40,41 @@ FONTS_HEAD = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
               '<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;'
               '0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">')
 
+# Gradio 6.30 sizes the Spaces iframe itself but stops growing it after a few quick grows (streaming,
+# font loads), so the page could not scroll. This reports the real content height to the parent instead.
+# It measures content-sized elements: main, .wrap and the columns stretch to the iframe and would feed back.
+FIT_JS = """
+(() => {
+  if (window.__nvFit) return; window.__nvFit = true;
+  const measure = () => {
+    const root = document.querySelector('.gradio-container');
+    if (!root) return 0;
+    let bottom = 0;
+    for (const el of root.querySelectorAll('main .block, main button, main [role=tablist]')) {
+      if (el.offsetParent) bottom = Math.max(bottom, el.getBoundingClientRect().bottom);  // skip hidden tabs
+    }
+    const foot = root.querySelector('footer');
+    return Math.ceil(bottom - root.getBoundingClientRect().top + (foot ? foot.offsetHeight : 0) + 48);
+  };
+  let raf = 0;
+  const report = () => {
+    raf = 0;
+    const h = measure();
+    if (h && window.parentIFrame && Math.abs(h - window.innerHeight) > 2) window.parentIFrame.size(h);
+  };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(report); };
+  const start = () => {
+    const main = document.querySelector('.gradio-container main');
+    if (!main) return setTimeout(start, 300);
+    new ResizeObserver(schedule).observe(main);
+    new MutationObserver(schedule).observe(main, {childList: true, subtree: true, attributes: true});
+    window.addEventListener('message', schedule);  // the parent's iframe-resizer handshake
+    schedule();
+  };
+  start();
+})();
+"""
+
 CSS = """
 :root {
   --paper:#F5F7F9; --ink:#1B2440; --graphite:#5B6478; --rule:#D7DCE5; --field:#FFFFFF;
@@ -50,18 +85,29 @@ CSS = """
   --paper:#141B2D; --ink:#E6EAF2; --graphite:#9AA4B8; --rule:#2A3350; --field:#1B2338;
   --kept:#4FC7B4; --dropped:#E0A84A;
 }
-.gradio-container { width:100% !important; max-width:1180px !important; margin:0 auto !important;
-  padding:0 16px !important; }
+.gradio-container { width:100% !important; max-width:1440px !important; margin:0 auto !important; }
 .gradio-container a { color:var(--ink); text-decoration-color:var(--rule); text-underline-offset:3px; }
 .gradio-container a:hover { text-decoration-color:var(--kept); }
 .gradio-container a:focus-visible, .gradio-container button:focus-visible {
   outline:2px solid var(--kept); outline-offset:2px; border-radius:2px; }
 
 /* masthead */
-.nv-masthead { padding:28px 0 6px; }
-.nv-masthead h1 { font-family:var(--serif); font-weight:500; font-size:34px; line-height:1.15;
-  letter-spacing:-0.01em; color:var(--ink); margin:0 0 6px; }
+.nv-masthead { padding:20px 0 2px; display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 18px; }
+.nv-masthead h1 { font-family:var(--serif); font-weight:500; font-size:27px; line-height:1.15;
+  letter-spacing:-0.01em; color:var(--ink); margin:0; }
 .nv-masthead p { font-size:15px; color:var(--graphite); margin:0; max-width:68ch; }
+
+/* the Ask desk: question + refine on the left, results in the center, the AI's steps on the right */
+.nv-desk { gap:32px !important; align-items:flex-start !important; }
+.nv-center { min-width:0; }
+.nv-pane-h { font-size:13px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--graphite); margin:4px 0 10px; }
+.nv-side .nv-ask textarea { font-size:17px !important; padding:12px 14px !important; }
+.nv-side .nv-refine { margin-top:8px; padding-top:14px; border-top:1px solid var(--rule); }
+.nv-more, .nv-more button { border:1px solid var(--rule) !important; }
+.nv-flush, .nv-flush .html-container { padding:0 !important; }
+/* when the three panes wrap (tablets, phones), show the short steps panel before the long results */
+@media (max-width: 1100px) { .nv-steps { order:2; } .nv-center { order:3; } }
 
 /* question box is the hero */
 .nv-ask textarea { font-family:var(--serif) !important; font-size:21px !important; line-height:1.4 !important;
@@ -74,22 +120,26 @@ CSS = """
 .nv-hint { color:var(--graphite); font-size:15px; max-width:68ch; }
 
 /* the sieve */
-.nv-sieve { margin:8px 0 4px; max-width:860px; }
-.nv-step { display:grid; grid-template-columns:minmax(150px, 15rem) 1fr 4.5rem; align-items:center;
-  gap:14px; padding:5px 0; font-size:15px; color:var(--ink); }
+.nv-sieve { margin:0 0 4px; }
+.nv-step { display:grid; grid-template-columns:1fr 4rem; align-items:center; gap:4px 10px; padding:6px 0;
+  font-size:15px; color:var(--ink); }
+.nv-step .nv-rail { grid-column:1 / span 2; grid-row:2; }
 .nv-step .label { color:var(--graphite); }
 .nv-step .count { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
 .nv-rail { position:relative; height:14px; }
 .nv-rail .was { position:absolute; inset:0 auto 0 0; border:1.5px solid var(--dropped); border-radius:2px;
   opacity:.75; }
 .nv-rail .kept { position:absolute; inset:0 auto 0 0; background:var(--kept); border-radius:2px; }
-.nv-step.note .label { grid-column:1 / span 3; font-style:italic; font-family:var(--serif); font-size:17px; }
+.nv-step.note .label { grid-column:1 / span 2; font-style:italic; font-family:var(--serif); font-size:17px; }
 .nv-step.new .kept { animation:grow .6s cubic-bezier(.2,.7,.2,1) both; transform-origin:left; }
 @keyframes grow { from { transform:scaleX(0); } to { transform:scaleX(1); } }
 @media (prefers-reduced-motion: reduce) { .nv-step.new .kept { animation:none; } }
 .nv-sieve details { margin-top:8px; font-size:13px; color:var(--graphite); }
 .nv-sieve details summary { cursor:pointer; font-size:15px; }
-.nv-sieve details ol { padding-left:20px; max-width:80ch; }
+.nv-sieve details ol { padding-left:20px; overflow-wrap:anywhere; }
+.nv-steps-empty { font-size:15px; color:var(--graphite); }
+.nv-steps-empty ol { padding-left:20px; margin:8px 0 0; }
+.nv-steps-empty li { margin:4px 0; }
 .nv-legend { font-size:13px; color:var(--graphite); margin-top:4px; }
 .nv-legend i { display:inline-block; width:18px; height:8px; vertical-align:middle; margin:0 4px 0 0;
   border-radius:2px; }
@@ -104,27 +154,33 @@ CSS = """
 .nv-answer > .nv-hint, .nv-answer .nv-hint { font-family:var(--serif); font-size:17px !important; }
 button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; padding:6px 14px !important;
   font-size:13px; }
-.nv-answer h3 { font-family:var(--serif); font-weight:500; font-size:27px; line-height:1.2; margin:0 0 12px; }
+.nv-answer h3 { font-family:var(--serif); font-weight:500; font-size:27px; line-height:1.2; margin:0 0 4px; }
+.nv-answer .nv-prose p.nv-note { font-family:var(--body-font, inherit) !important; font-size:13px !important;
+  color:var(--graphite); margin:0 0 12px; }
 .nv-answer h2, .nv-answer h4 { font-family:var(--serif); font-weight:600; font-size:21px; }
 .nv-answer details { margin-top:24px; font-size:15px; color:var(--graphite); }
 .nv-answer details summary { cursor:pointer; font-family:var(--body-font, inherit); }
 
-/* reading list */
-.nv-reading h2 { font-family:var(--serif); font-weight:500; font-size:21px; margin:0 0 10px; color:var(--ink); }
-.nv-reading ol { list-style:none; counter-reset:r; padding:0; margin:0; }
-.nv-reading li { counter-increment:r; display:grid; grid-template-columns:1.8rem 1fr; padding:12px 0;
-  border-top:1px solid var(--rule); }
-.nv-reading li::before { content:counter(r); font-family:var(--serif); font-size:21px; color:var(--kept);
-  line-height:1.2; }
-.nv-reading .t { font-family:var(--serif); font-size:17px; line-height:1.35; font-weight:500; }
-.nv-item a.t, .nv-reading a.t { display:block; padding:0 !important; text-decoration:none; color:var(--ink);
+/* references under the summary */
+.nv-refs { margin-top:28px; }
+.nv-refs h2 { font-family:var(--serif); font-weight:500; font-size:21px; margin:0; color:var(--ink); }
+.nv-refs .nv-count { font-size:13px; color:var(--graphite); margin:2px 0 10px; }
+.nv-refs ol { list-style:none; padding:0; margin:0; }
+.nv-refs li { display:grid; grid-template-columns:2.6rem 1fr; padding:14px 0; border-top:1px solid var(--rule); }
+.nv-refs li .n { font-family:var(--serif); font-size:17px; color:var(--kept); line-height:1.35;
+  font-variant-numeric:tabular-nums; }
+.nv-refs .t { font-family:var(--serif); font-size:19px; line-height:1.35; font-weight:500; }
+.nv-item a.t, .nv-refs a.t { display:block; padding:0 !important; text-decoration:none; color:var(--ink);
   text-align:left; }
-.nv-item, .nv-reading li, .nv-step { text-align:left; }
-.nv-item a.t:hover, .nv-reading a.t:hover { text-decoration:underline; text-decoration-color:var(--kept); }
+.nv-item, .nv-refs li, .nv-step { text-align:left; }
+.nv-item a.t:hover, .nv-refs a.t:hover { text-decoration:underline; text-decoration-color:var(--kept); }
 .nv-item .m a.pdf { margin-left:12px; padding:0 !important; }
-.nv-reading .m, .nv-item .m { font-size:13px; color:var(--graphite); margin:4px 0 0; }
-.nv-reading .why { font-size:15px; margin:6px 0 0; color:var(--ink); }
-.nv-reading .empty, .nv-rows .empty { color:var(--graphite); font-size:15px; }
+.nv-refs .m, .nv-item .m { font-size:13px; color:var(--graphite); margin:4px 0 0; }
+.nv-refs .d { font-size:15px; line-height:1.55; margin:6px 0 0; color:var(--ink); max-width:75ch; }
+.nv-refs .d .lbl { font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+  margin-right:6px; color:var(--kept); }
+.nv-refs .d.ab .lbl { color:var(--graphite); }
+.nv-refs .empty, .nv-rows .empty { color:var(--graphite); font-size:15px; }
 
 /* result rows (search, latest) */
 .nv-rows { max-width:860px; }
@@ -132,7 +188,7 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-item { padding:14px 0; border-top:1px solid var(--rule); }
 .nv-item .t { font-family:var(--serif); font-size:21px; line-height:1.3; font-weight:500; }
 .nv-item .s { font-size:15px; line-height:1.55; color:var(--ink); margin:6px 0 0; max-width:75ch; }
-.nv-item mark, .nv-reading mark { background:color-mix(in srgb, var(--kept) 14%, transparent); color:inherit;
+.nv-item mark { background:color-mix(in srgb, var(--kept) 14%, transparent); color:inherit;
   padding:0; border-radius:2px; }
 .nv-kind { display:inline-block; width:.9em; text-align:center; margin-right:4px; color:var(--graphite); }
 
@@ -172,10 +228,8 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
   .nv-about td { min-width:0 !important; border:none !important; padding:2px 0 !important; }
   .nv-about td:nth-child(1) { font-size:17px; }
   .nv-about td:nth-child(3) { padding-top:6px !important; }
-  .nv-masthead h1 { font-size:27px; }
+  .nv-masthead h1 { font-size:24px; }
   .nv-ask textarea { font-size:17px !important; }
-  .nv-step { grid-template-columns:1fr 3.5rem; gap:4px 10px; }
-  .nv-step .nv-rail { grid-column:1 / span 2; grid-row:2; }
   .nv-item .t { font-size:17px; }
 }
 """
@@ -275,43 +329,96 @@ def rows(items: list[NewsItem], query: str = "", count_line: str = "") -> str:
 
 
 # ---------------------------------------------------------------- assistant outputs
-def reading_list_html(refs: list[Candidate]) -> str:
+REF_PAGE = 25
+SEARCH_PAGE = 50
+REF_SORTS = [("Relevance", "relevance"), ("Newest", "date"), ("Oldest", "oldest"), ("Most upvoted", "upvotes")]
+
+
+def view_refs(refs: list[Candidate], sort: str = "relevance", source_type: str = "any",
+              window: str = "Any time", sources: list[str] | None = None) -> list[tuple[int, Candidate]]:
+    """(number, reference) pairs after the view filters and sort. Numbers come from relevance order, so the
+    summary's [n] citations still point at the right item after re-sorting."""
+    days = DATE_WINDOWS.get(window)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    out = [(n, c) for n, c in enumerate(refs, 1)
+           if (not sources or c["source"] in sources)
+           and (source_type in (None, "any", "all") or c.get("source_type") == source_type)
+           and (cutoff is None or parse_iso(c["published"]) >= cutoff)]
+    if sort in ("date", "oldest"):
+        out.sort(key=lambda p: p[1]["published"], reverse=sort == "date")
+    elif sort == "upvotes":
+        out.sort(key=lambda p: (p[1].get("upvotes", 0), -p[0]), reverse=True)
+    return out
+
+
+def _ref_item(n: int, c: Candidate) -> str:
+    if c.get("digest"):
+        body = f'<p class="d"><span class="lbl">Model summary</span>{html.escape(c["digest"])}</p>'
+    else:
+        text = c.get("summary", "")
+        text = text[:320].rsplit(" ", 1)[0] + "…" if len(text) > 320 else text
+        body = f'<p class="d ab"><span class="lbl">From the abstract</span>{html.escape(text)}</p>' if text else ""
+    return (f'<li id="nv-ref-{n}"><span class="n">[{n}]</span><div>'
+            f'<a class="t" href="{html.escape(c["url"])}" target="_blank" rel="noopener">{html.escape(c["title"])}</a>'
+            f'{_meta(c["source"], c.get("source_type", "paper"), c["published"], c.get("upvotes", 0))}'
+            f'{body}</div></li>')
+
+
+def references_html(refs: list[Candidate], sort: str = "relevance", source_type: str = "any",
+                    window: str = "Any time", sources: list[str] | None = None, shown: int = REF_PAGE,
+                    summarized: int = 0) -> str:
     if not refs:
         return ""
-    items = []
-    for c in refs:
-        why = f'<p class="why">{html.escape(c["reason"])}</p>' if c.get("reason") else ""
-        items.append(f'<li><div><a class="t" href="{html.escape(c["url"])}" target="_blank" rel="noopener">'
-                     f'{html.escape(c["title"])}</a>'
-                     f'{_meta(c["source"], c.get("source_type", "paper"), c["published"], c.get("upvotes", 0))}'
-                     f'{why}</div></li>')
-    return f'<section class="nv-reading"><h2>Read these first</h2><ol>{"".join(items)}</ol></section>'
+    view = view_refs(refs, sort, source_type, window, sources)
+    order = dict(REF_SORTS)
+    sort_name = next((k for k, v in order.items() if v == sort), "relevance").lower()
+    head = f"{len(refs):,} reference{'s' if len(refs) != 1 else ''} · sorted by {sort_name}"
+    if len(view) < len(refs):
+        head += f" · {len(view):,} match your filters"
+        hidden = summarized - sum(1 for n, _ in view if n <= summarized)
+        if hidden > 0:
+            head += f" ({hidden} cited in the summary {'is' if hidden == 1 else 'are'} hidden)"
+    if len(view) > shown:
+        head += f" · showing {shown:,}"
+    items = "".join(_ref_item(n, c) for n, c in view[:shown])
+    body = f"<ol>{items}</ol>" if items else '<p class="empty">No reference matches these filters.</p>'
+    return f'<section class="nv-refs"><h2>References</h2><p class="nv-count">{head}</p>{body}</section>'
+
+
+def has_more(refs: list[Candidate], shown: int, sort: str = "relevance", source_type: str = "any",
+             window: str = "Any time", sources: list[str] | None = None) -> bool:
+    return len(view_refs(refs, sort, source_type, window, sources)) > shown
 
 
 # kept for callers that want markdown (e.g. MCP clients reading the API output)
 def format_references(refs: list[Candidate]) -> str:
     return "\n\n".join(f"[{n}] [{c['title']}]({c['url']}) ({c['source']}, {human_date(c['published'])})"
-                       + (f"\n{c['reason']}" if c.get("reason") else "") for n, c in enumerate(refs, 1))
+                       + (f"\n{c['digest']}" if c.get("digest") else "") for n, c in enumerate(refs, 1))
 
 
 STEP_LABEL = {
-    "retrieve": "Matched your question",
-    "rerank": "Best matches after reranking",
-    "grade_documents": "Judged relevant by the model",
-    "live_search": "Added from a live arXiv search",
-    "generate": "Used in the answer",
+    "retrieve": "Pulled from the collection",
+    "rerank": "Relevant after reranking",
+    "grade_documents": "Reviewed and kept by the model",
+    "live_search": "Found by a live arXiv search",
+    "generate": "In the results",
 }
 STEP_NOTE = {
     "analyze_query": "Reading your question",
     "rewrite_query": "Too few were relevant, so the question was reworded and searched again",
 }
-
+STEPS_EMPTY = ("<div class='nv-steps-empty'>As the assistant works, this panel shows how the collection is "
+               "narrowed, with the real count at each step:<ol>"
+               "<li>Pull candidates by keyword (BM25) and meaning (embeddings).</li>"
+               "<li>Rerank them with a cross-encoder; keep every one that is relevant.</li>"
+               "<li>The model reviews the best ones and writes a short summary of each.</li>"
+               "<li>If too few are relevant: reword the question, then search arXiv live.</li></ol></div>")
 
 def _bar(count: int, was: int | None, total: int) -> str:
     scale = math.log10(max(total, 10) + 1)
 
     def pct(n: int) -> float:
-        return round(100 * math.log10(n + 1) / scale, 1) if n > 0 else 0.0
+        return min(100.0, round(100 * math.log10(n + 1) / scale, 1)) if n > 0 else 0.0
 
     was_el = f'<span class="was" style="width:{pct(was)}%"></span>' if was is not None and was > count else ""
     return f'<span class="nv-rail" aria-hidden="true">{was_el}<span class="kept" style="width:{pct(count)}%"></span></span>'
@@ -320,10 +427,10 @@ def _bar(count: int, was: int | None, total: int) -> str:
 def sieve_html(total: int, steps: list[dict], trace: list[str] | None = None, working: bool = False) -> str:
     """The narrowing from the whole collection to the items used in the answer, one row per step."""
     if not steps and not working:
-        return ""
+        return STEPS_EMPTY
     out = [f'<div class="nv-step"><span class="label">In the collection</span>{_bar(total, None, total)}'
            f'<span class="count">{total:,}</span></div>']
-    prev = total
+    pool = total
     for i, st in enumerate(steps):
         new = " new" if i == len(steps) - 1 else ""
         node, count = st["node"], st.get("count")
@@ -335,23 +442,30 @@ def sieve_html(total: int, steps: list[dict], trace: list[str] | None = None, wo
         if node == "live_search":
             out.append(f'<div class="nv-step{new}"><span class="label">{STEP_LABEL[node]}</span>'
                        f'{_bar(count, None, total)}<span class="count">+{count}</span></div>')
-            prev = count
+            pool = count
             continue
-        out.append(f'<div class="nv-step{new}"><span class="label">{STEP_LABEL.get(node, node)}</span>'
-                   f'{_bar(count or 0, prev, total)}<span class="count">{count or 0:,}</span></div>')
-        prev = count or 0
+        # outline = what this step filtered out; only retrieve (from the collection) and rerank (from the pool) narrow
+        was = {"retrieve": total, "rerank": pool}.get(node)
+        label = STEP_LABEL.get(node, node)
+        if node == "generate" and st.get("summarized"):
+            label += f" (summary from the best {st['summarized']})"
+        out.append(f'<div class="nv-step{new}"><span class="label">{label}</span>'
+                   f'{_bar(count or 0, was, total)}<span class="count">{count or 0:,}</span></div>')
+        if node == "retrieve":
+            pool = count or 0
     legend = ('<p class="nv-legend"><i class="k"></i>kept<i class="d"></i>filtered out at this step</p>'
               if len(steps) > 1 else "")
     detail = ""
     if trace:
         lines = "".join(f"<li>{re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'<strong>\1</strong>', html.escape(t))}</li>"
                         for t in trace)
-        detail = f"<details><summary>How this answer was found</summary><ol>{lines}</ol></details>"
+        detail = f"<details><summary>Technical details</summary><ol>{lines}</ol></details>"
     return f'<section class="nv-sieve" aria-label="How the collection was narrowed">{"".join(out)}{legend}{detail}</section>'
 
 
-def answer_md(question: str, body: str, earlier: list[tuple[str, str]]) -> str:
-    md = f"<div class='nv-prose'>\n\n### {html.escape(question)}\n\n{body}\n\n</div>"
+def answer_md(question: str, body: str, earlier: list[tuple[str, str]], note: str = "") -> str:
+    note = f"<p class='nv-note'>{html.escape(note)}</p>\n\n" if note else ""
+    md = f"<div class='nv-prose'>\n\n### {html.escape(question)}\n\n{note}{body}\n\n</div>"
     if earlier:
         items = "\n\n".join(f"**{html.escape(q)}**\n\n{a}" for q, a in reversed(earlier))
         md += f"\n\n<details><summary>Earlier in this session ({len(earlier)})</summary>\n\n{items}\n\n</details>"
@@ -372,12 +486,31 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
             window: one of "Any time", "Last 24 hours", "Last 3 days", "Last week", "Last month", "Last 3 months"
             sort: "relevance", "date" or "upvotes"
         """
+        return search_page(query, sources, source_type, window, sort, SEARCH_PAGE)[0]
+
+    def search_page(query: str, sources: list[str], source_type: str, window: str, sort: str,
+                    shown: int) -> tuple[str, int]:
         hits = keyword_search(store, query, sources or None, source_type, DATE_WINDOWS.get(window), sort)
         n = len(hits)
-        line = "Showing the 50 best matches" if n == 50 else f"{n} result{'s' if n != 1 else ''}"
-        if sort == "date" and n == 50:
-            line = "Showing the 50 newest matches"
-        return rows([h[0] for h in hits], query, line)
+        line = f"{n:,} result{'s' if n != 1 else ''}" + (f", showing the first {shown:,}" if n > shown else "")
+        return rows([h[0] for h in hits[:shown]], query, line), n
+
+    def search_more(query, sources, source_type, window, sort, shown):
+        shown = int(shown or 0) + SEARCH_PAGE
+        out, n = search_page(query, sources, source_type, window, sort, shown)
+        return out, shown, gr.update(visible=n > shown)
+
+    def search_reset(query, sources, source_type, window, sort):
+        n = len(keyword_search(store, query, sources or None, source_type, DATE_WINDOWS.get(window), sort))
+        return SEARCH_PAGE, gr.update(visible=n > SEARCH_PAGE)
+
+    def refine(results: dict, sort: str, source_type: str, window: str, sources: list[str], shown: int = REF_PAGE):
+        refs = (results or {}).get("refs", [])
+        return (references_html(refs, sort, source_type, window, sources, shown, (results or {}).get("summarized", 0)),
+                shown, gr.update(visible=has_more(refs, shown, sort, source_type, window, sources)))
+
+    def refine_more(results, sort, source_type, window, sources, shown):
+        return refine(results, sort, source_type, window, sources, int(shown or 0) + REF_PAGE)
 
     def latest(sources: list[str], source_type: str, n: float) -> str:
         """The newest items in the collection, optionally filtered by source and type."""
@@ -412,28 +545,47 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         masthead = gr.HTML(masthead_html(store))
         with gr.Tabs():
             with gr.Tab("Ask"):
-                msg = gr.Textbox(placeholder=ASK_PLACEHOLDER, show_label=False, submit_btn="Ask",
-                                 lines=1, max_lines=4, elem_classes="nv-ask", autofocus=True)
-                with gr.Row(elem_classes="nv-filters"):
-                    a_sources = gr.Dropdown(source_names, multiselect=True, label="Sources", info="Empty means all")
-                    a_type = gr.Radio(TYPE_CHOICES, value="any", label="Type")
-                    a_window = gr.Dropdown(list(DATE_WINDOWS), value="Any time", label="Published")
-                gr.Examples(EXAMPLES, inputs=msg, label="Or try one of these")
-                sieve = gr.HTML()
-                with gr.Row(equal_height=False):
-                    with gr.Column(scale=3, min_width=320):
+                with gr.Row(elem_classes="nv-desk", equal_height=False):
+                    with gr.Column(scale=1, min_width=260, elem_classes="nv-side"):
+                        msg = gr.Textbox(placeholder=ASK_PLACEHOLDER, show_label=False, lines=3, max_lines=8,
+                                         elem_classes="nv-ask", autofocus=True)
+                        ask = gr.Button("Ask", variant="primary")
+                        gr.Examples(EXAMPLES, inputs=msg, label="Or try one of these")
+                        with gr.Column(elem_classes="nv-refine"):
+                            gr.HTML('<p class="nv-pane-h">Refine the list</p>', elem_classes="nv-flush")
+                            a_sort = gr.Dropdown(REF_SORTS, value="relevance", label="Sort by")
+                            a_type = gr.Radio(TYPE_CHOICES, value="any", label="Type")
+                            a_window = gr.Dropdown(list(DATE_WINDOWS), value="Any time", label="Published")
+                            a_sources = gr.Dropdown(source_names, multiselect=True, label="Sources",
+                                                    info="Empty means all")
+                        start_over = gr.Button("Start a new conversation", size="sm", variant="secondary",
+                                               elem_classes="nv-reset")
+                    with gr.Column(scale=3, min_width=380, elem_classes="nv-center"):
                         answer = gr.Markdown(f"<p class='nv-hint'>{ASK_EMPTY}</p>", elem_classes="nv-answer")
-                    with gr.Column(scale=2, min_width=280):
-                        refs = gr.HTML()
-                with gr.Row():
-                    start_over = gr.Button("Start a new conversation", size="sm", variant="secondary",
-                                           scale=0, min_width=220, elem_classes="nv-reset")
+                        refs = gr.HTML(elem_classes="nv-flush")
+                        more = gr.Button("Show more references", size="sm", variant="secondary", visible=False,
+                                         elem_classes="nv-more")
+                    with gr.Column(scale=1, min_width=260, elem_classes="nv-steps"):
+                        gr.HTML('<p class="nv-pane-h">What the assistant did</p>', elem_classes="nv-flush")
+                        sieve = gr.HTML(STEPS_EMPTY, elem_classes="nv-flush")
                 conv = gr.State([])
-                # History lives in gr.State: it is hidden from the API/MCP schema, so callers only pass
-                # (message, sources, source_type, window) and can't send a malformed chat history.
-                msg.submit(assistant_fn, [msg, conv, a_sources, a_type, a_window], [answer, refs, sieve, msg, conv])
-                start_over.click(lambda: (f"<p class='nv-hint'>{ASK_EMPTY}</p>", "", "", "", []), None,
-                                 [answer, refs, sieve, msg, conv], api_visibility="private")
+                results = gr.State({})
+                shown = gr.State(REF_PAGE)
+                # History and results live in gr.State: hidden from the API/MCP schema, so callers only pass
+                # (message, sources, source_type, window, sort) and can't send a malformed chat history.
+                ask_inputs = [msg, conv, a_sources, a_type, a_window, a_sort]
+                ask_outputs = [answer, refs, sieve, msg, conv, results, shown]
+                view = [results, a_sort, a_type, a_window, a_sources]
+                msg.submit(assistant_fn, ask_inputs, ask_outputs).then(
+                    refine, view, [refs, shown, more], api_visibility="private")
+                ask.click(assistant_fn, ask_inputs, ask_outputs, api_visibility="private").then(
+                    refine, view, [refs, shown, more], api_visibility="private")
+                for comp in (a_sort, a_type, a_window, a_sources):
+                    comp.change(refine, view, [refs, shown, more], api_visibility="private")
+                more.click(refine_more, view + [shown], [refs, shown, more], api_visibility="private")
+                start_over.click(lambda: (f"<p class='nv-hint'>{ASK_EMPTY}</p>", "", STEPS_EMPTY, "", [], {},
+                                          REF_PAGE, gr.update(visible=False)), None,
+                                 ask_outputs + [more], api_visibility="private")
 
             with gr.Tab("Search"):
                 q = gr.Textbox(placeholder='Keywords, e.g. diffusion "video editing"', show_label=False,
@@ -444,12 +596,19 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                     s_window = gr.Dropdown(list(DATE_WINDOWS), value="Any time", label="Published")
                     s_sort = gr.Radio([("Best match", "relevance"), ("Newest", "date"), ("Most upvoted", "upvotes")],
                                       value="relevance", label="Sort by")
-                results = gr.HTML('<p class="nv-hint">Type keywords and press Enter. Put a phrase in quotes '
-                                  'to match it exactly.</p>')
+                s_results = gr.HTML('<p class="nv-hint">Type keywords and press Enter. Put a phrase in quotes '
+                                    'to match it exactly.</p>')
+                s_more = gr.Button("Show more results", size="sm", variant="secondary", visible=False,
+                                   elem_classes="nv-more")
+                s_shown = gr.State(SEARCH_PAGE)
                 inputs = [q, s_sources, s_type, s_window, s_sort]
-                q.submit(search, inputs, results)
+                q.submit(search, inputs, s_results).then(search_reset, inputs, [s_shown, s_more],
+                                                          api_visibility="private")
                 for comp in (s_sources, s_type, s_window, s_sort):
-                    comp.change(search, inputs, results, api_visibility="private")
+                    comp.change(search, inputs, s_results, api_visibility="private").then(
+                        search_reset, inputs, [s_shown, s_more], api_visibility="private")
+                s_more.click(search_more, inputs + [s_shown], [s_results, s_shown, s_more],
+                             api_visibility="private")
 
             with gr.Tab("Latest"):
                 with gr.Row(elem_classes="nv-filters"):

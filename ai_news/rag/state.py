@@ -16,7 +16,7 @@ class Candidate(TypedDict, total=False):
     summary: str
     upvotes: int
     score: float
-    reason: str
+    digest: str                 # the LLM's short summary of the item, for the items it reviewed
 
 
 class GraphState(TypedDict, total=False):
@@ -27,10 +27,13 @@ class GraphState(TypedDict, total=False):
     queries: list[str]
     source_type: str | None
     days: int | None
-    candidates: list[Candidate]
+    candidates: list[Candidate]  # the retrieval pool of the latest retrieve / live search
+    matches: list[Candidate]     # everything the reranker kept, across rewrites, best first
+    verdicts: dict               # id -> {"relevant": bool, "digest": str} for items the LLM reviewed
     relevant: list[Candidate]
     retries: int
     live_searched: bool
     answer: str
     references: list[Candidate]
+    summarized: int             # how many of the references the summary was written from
     trace: Annotated[list[str], operator.add]

@@ -23,7 +23,12 @@ log = logging.getLogger(__name__)
 
 RRF_K = 60
 MIN_RELEVANT = 3
-RERANK_TOP = 8
+POOL_PER_RANKING = 200  # BM25 and FAISS hits per query that go into the fusion
+MAX_POOL = 300          # compute cap for the cross-encoder, not the result count
+MIN_RELEVANCE = 0.02    # reranker probability to count as a match; bge-reranker scores on-topic papers
+                        # as low as 0.02, so this favours recall (tuned on the real corpus, Oct 2026)
+MIN_KEEP = 5            # keep at least this many matches so the LLM has something to judge
+GRADE_TOP = 10          # the LLM reviews and summarizes this many new matches per grading pass
 
 
 def extract_json(text: str) -> Any:
@@ -101,7 +106,8 @@ class RagNodes:
         fused: dict[str, float] = {}
         items: dict[str, NewsItem] = {}
         for q in state["queries"]:
-            for ranking in (self.store.bm25_scores(q)[:50], self.store.vector_search(q, k=50)):
+            for ranking in (self.store.bm25_scores(q)[:POOL_PER_RANKING],
+                            self.store.vector_search(q, k=POOL_PER_RANKING)):
                 for rank, (it, _) in enumerate(ranking):
                     if not passes_filters(it, sources, stype, days):
                         continue
@@ -110,43 +116,60 @@ class RagNodes:
         # A date window from the LLM can be too strict; fall back to no window rather than nothing.
         if not fused and days and not (state.get("filters") or {}).get("days"):
             return self.retrieve({**state, "days": None})
-        top = sorted(fused, key=fused.get, reverse=True)[:30]
+        top = sorted(fused, key=fused.get, reverse=True)[:MAX_POOL]
         cands = [to_candidate(items[i], fused[i]) for i in top]
         return {"candidates": cands,
                 "trace": [f"**Retrieve** (BM25 + FAISS, RRF) → {len(cands)} candidates"]}
 
     def rerank(self, state: GraphState) -> dict:
+        """Score the whole pool and keep every item the cross-encoder finds relevant, merged with the
+        matches of earlier passes (after a rewrite or live search). Items the LLM rejected stay out."""
         cands = state.get("candidates", [])
+        kept = cands
         if self.reranker and cands:
             scores = self.reranker.score(state["question"], [f"{c['title']}. {c['summary'][:1000]}" for c in cands])
-            for c, s in zip(cands, scores):
-                rel = 1 / (1 + math.exp(-s))
-                c["score"] = rel + 0.15 * recency_boost(c["published"]) + 0.03 * math.log1p(c.get("upvotes", 0))
-            cands = sorted(cands, key=lambda c: c["score"], reverse=True)
-        top = cands[:RERANK_TOP]
-        return {"candidates": top, "trace": [f"**Rerank** (cross-encoder + recency/upvotes) → top {len(top)}"]}
+            rels = [min(max(s, 0.0), 1.0) for s in scores]  # Reranker.score returns probabilities
+            for c, rel in zip(cands, rels):
+                # multiplicative, so recency and upvotes only reorder items of similar relevance
+                c["score"] = rel * (1 + 0.25 * recency_boost(c["published"]) + 0.05 * math.log1p(c.get("upvotes", 0)))
+            by_rel = sorted(zip(rels, cands), key=lambda p: p[0], reverse=True)
+            kept = [c for r, c in by_rel if r >= MIN_RELEVANCE]
+            if len(kept) < MIN_KEEP:
+                kept = [c for _, c in by_rel[:MIN_KEEP]]
+        verdicts = state.get("verdicts") or {}
+        merged = {c["id"]: c for c in state.get("matches", [])}
+        merged.update({c["id"]: {**merged.get(c["id"], {}), **c} for c in kept})
+        matches = sorted((c for c in merged.values() if verdicts.get(c["id"], {}).get("relevant", True)),
+                         key=lambda c: c.get("score", 0), reverse=True)
+        return {"matches": matches,
+                "trace": [f"**Rerank** (cross-encoder, relevance ≥ {MIN_RELEVANCE}, × recency/upvotes) → "
+                          f"{len(kept)} of {len(cands)} kept, {len(matches)} matches in total"]}
 
     def grade_documents(self, state: GraphState) -> dict:
-        cands = state.get("candidates", [])
-        if not cands:
-            return {"relevant": [], "trace": ["**Grade** → no candidates"]}
-        try:
-            verdicts = extract_json(self._ask(prompts.GRADE.format(question=state["question"],
-                                                                   docs=format_docs(cands, 400))))
-            if isinstance(verdicts, dict):
-                verdicts = verdicts.get("results") or [verdicts]
-            relevant = []
-            for v in verdicts:
-                n = int(v.get("doc", 0))
-                if v.get("relevant") in (True, "true", "yes") and 1 <= n <= len(cands):
-                    relevant.append({**cands[n - 1], "reason": str(v.get("reason", ""))})
-        except Exception as e:
-            log.warning("grade fallback: %s", e)
-            relevant = [{**c, "reason": ""} for c in cands[:5]]
-        # keep any previously graded relevant docs (after a rewrite or live search)
-        seen = {c["id"] for c in relevant}
-        relevant += [c for c in state.get("relevant", []) if c["id"] not in seen]
-        return {"relevant": relevant, "trace": [f"**Grade** (LLM judge) → {len(relevant)}/{len(cands)} relevant"]}
+        verdicts = dict(state.get("verdicts") or {})
+        matches = state.get("matches", [])
+        todo = [c for c in matches if c["id"] not in verdicts][:GRADE_TOP]
+        if todo:
+            try:
+                out = extract_json(self._ask(prompts.GRADE.format(question=state["question"],
+                                                                  docs=format_docs(todo, 400))))
+                if isinstance(out, dict):
+                    out = out.get("results") or [out]
+                for v in out:
+                    n = int(v.get("doc", 0))
+                    if 1 <= n <= len(todo):
+                        digest = str(v.get("digest") or v.get("summary") or v.get("reason") or "").strip()
+                        verdicts[todo[n - 1]["id"]] = {"relevant": v.get("relevant") in (True, "true", "yes"),
+                                                       "digest": digest}
+            except Exception as e:
+                log.warning("grade fallback: %s", e)
+                verdicts.update({c["id"]: {"relevant": True, "digest": ""} for c in todo[:5]})
+        matches = [c for c in matches if verdicts.get(c["id"], {}).get("relevant", True)]
+        relevant = [{**c, "digest": verdicts[c["id"]]["digest"]} for c in matches if c["id"] in verdicts]
+        n_ok = sum(1 for c in todo if verdicts.get(c["id"], {}).get("relevant"))
+        return {"verdicts": verdicts, "matches": matches, "relevant": relevant,
+                "trace": [f"**Grade** (LLM judge + digests) → {n_ok}/{len(todo)} new relevant, "
+                          f"{len(relevant)} relevant in total"]}
 
     def route_after_grade(self, state: GraphState) -> str:
         if len(state.get("relevant", [])) >= MIN_RELEVANT:
@@ -178,22 +201,26 @@ class RagNodes:
             found = []
         if found:
             self.store.add(found)  # grows the corpus; persisted on the next refresh
-        known = {c["id"] for c in state.get("candidates", [])}
-        cands = state.get("candidates", []) + [to_candidate(it) for it in found if it.id not in known]
+        known = {c["id"] for c in state.get("matches", [])}
+        cands = [to_candidate(it) for it in found if it.id not in known]
         return {"candidates": cands, "live_searched": True,
                 "trace": [f"**Live arXiv search** for '{q}' → {len(found)} papers"]}
 
     def generate(self, state: GraphState) -> dict:
-        refs = state.get("relevant") or []
-        partial = False
-        if not refs:
-            refs, partial = state.get("candidates", [])[:5], True
+        """Summary from the best reviewed matches; references are every match, reviewed ones first.
+        Citation numbers [n] are positions in that reference list."""
+        relevant = sorted(state.get("relevant") or [], key=lambda c: c.get("score", 0), reverse=True)
+        seen = {c["id"] for c in relevant}
+        rest = [c for c in state.get("matches", []) if c["id"] not in seen] or \
+            ([] if relevant else state.get("candidates", [])[:MIN_KEEP])
+        refs = [{**c, "summary": c["summary"][:700]} for c in relevant + rest]
         if not refs:
             return {"answer": "I couldn't find anything in the corpus or on arXiv for this request. "
-                              "Try broader terms or remove filters.",
+                              "Try broader terms.",
                     "references": [], "trace": ["**Generate** → nothing to answer from"]}
-        refs = sorted(refs, key=lambda c: c.get("score", 0), reverse=True)[:8]
-        answer = self._ask(prompts.GENERATE.format(question=state["question"], docs=format_docs(refs, 700)))
-        if partial:
+        used = refs[:min(len(relevant), GRADE_TOP)] or refs[:MIN_KEEP]
+        answer = self._ask(prompts.GENERATE.format(question=state["question"], docs=format_docs(used, 700)))
+        if not relevant:
             answer = "_No result passed the relevance check; these are the closest matches._\n\n" + answer
-        return {"answer": answer, "references": refs, "trace": [f"**Generate** → answer from {len(refs)} sources"]}
+        return {"answer": answer, "references": refs, "summarized": len(used),
+                "trace": [f"**Generate** → summary from {len(used)} sources, {len(refs)} references"]}

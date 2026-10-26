@@ -10,7 +10,7 @@ Return ONLY a JSON object of this shape:
   "date_window_days": <integer days if the user asks for recent/latest/this week/month, else null>,
   "source_type": "paper" | "blog" | "any"}}"""
 
-GRADE = """You are grading search results for relevance to a research request.
+GRADE = """You are reviewing search results for a research request.
 
 Request: {question}
 
@@ -18,8 +18,9 @@ Results:
 {docs}
 
 For EACH result decide if it is genuinely useful for the request (on-topic, not merely sharing a keyword).
+For useful ones, write a digest: at most 30 words on what the work does and how it bears on the request.
 Return ONLY a JSON list, one object per result, in order:
-[{{"doc": 1, "relevant": true, "reason": "<max 20 words: why it helps>"}}, ...]"""
+[{{"doc": 1, "relevant": true, "digest": "<max 30 words>"}}, {{"doc": 2, "relevant": false, "digest": ""}}, ...]"""
 
 REWRITE = """The search for this request returned too few relevant results.
 
@@ -36,8 +37,8 @@ Request: {question}
 Sources:
 {docs}
 
-Write 2 to 4 short paragraphs of plain prose (no headings, no numbered lists) that summarize what these
-sources say about the request. Cite sources inline as [1], [2]. Mention concrete methods, models, or findings.
-End with one final paragraph that begins with "**Start with** [n]" and says in one sentence why that
-source is the best one to read first.
+Write 1 or 2 short paragraphs of plain prose (no headings, no lists) that summarize what these sources
+say together about the request: the main approaches, how they differ, and any concrete models or findings.
+Cite sources inline as [1], [2]. End with one final sentence that begins with "**Start with** [n]" and says
+why that source is the best one to read first.
 Do not invent sources, numbers, or links. If the sources only partly cover the request, say so."""
