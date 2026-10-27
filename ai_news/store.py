@@ -48,6 +48,12 @@ class VectorIndex:
             self.index = faiss.IndexIDMap2(faiss.IndexFlatIP(x.shape[1]))
         self.index.add_with_ids(x, np.array([faiss_id(i) for i in item_ids], dtype="int64"))
 
+    def get(self, item_ids: list[str]) -> np.ndarray:
+        """The stored vectors for these items, in the same order (no re-embedding)."""
+        if self.index is None or not item_ids:
+            return np.zeros((0, self.index.d if self.index is not None else 0), dtype="float32")
+        return np.vstack([self.index.reconstruct(faiss_id(i)) for i in item_ids]).astype("float32")
+
     def remove(self, item_ids: list[str]) -> None:
         if self.index is not None and item_ids:
             self.index.remove_ids(np.array([faiss_id(i) for i in item_ids], dtype="int64"))
@@ -93,6 +99,7 @@ class CorpusStore:
         self._bm25: BM25Okapi | None = None
         self._bm25_ids: list[str] = []
         self._snapshot_mtime = 0.0  # mtime of the on-disk snapshot this process last loaded or wrote
+        self.version = 0  # bumped whenever the items change; keys caches such as the research map
         _STORES.add(self)
 
     # ---------- persistence ----------
@@ -143,6 +150,7 @@ class CorpusStore:
             if not len(self.vectors) and self.items:
                 self._rebuild_vectors()
             self._rebuild_bm25()
+            self.version += 1
         log.info("corpus loaded: %d items", len(self.items))
 
     def save(self) -> None:
@@ -188,6 +196,7 @@ class CorpusStore:
             self._by_faiss_id.update({faiss_id(i): i for i in fresh})
             self.vectors.add(list(fresh), vectors)
             self._rebuild_bm25()
+            self.version += 1
         return list(fresh.values())
 
     def prune(self) -> int:
@@ -200,6 +209,7 @@ class CorpusStore:
                     self._by_faiss_id.pop(faiss_id(i), None)
                 self.vectors.remove(old)
                 self._rebuild_bm25()
+                self.version += 1
         return len(old)
 
     def _rebuild_vectors(self) -> None:

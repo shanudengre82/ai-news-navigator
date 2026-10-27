@@ -34,6 +34,28 @@ assistant's steps on the right. The steps panel (the "sieve") shows the real cou
 filter the references afterwards (relevance, newest, oldest, most upvoted; type, date, source) without
 asking again; the [n] numbers stay attached to their items.
 
+### The landing page and the research map
+
+Before you ask anything, the center of the Ask tab shows the collection itself: its size, how many items
+arrived in the last 7 days compared with the week before, a chart of new papers per day for the last 30 days,
+and a 3D map of the papers.
+
+The map follows Andrej Karpathy's "LLM wiki" idea, where notes link to the concept pages they belong to and to
+one another, as in Obsidian's graph view. Here the collection builds the wiki itself, with no LLM and no extra
+cost:
+
+1. **Topics.** k-means clustering over the paper embeddings the search already uses finds up to 36 topics.
+   Each topic is named by the title words that are most typical of it and rare elsewhere (tf-idf over titles).
+2. **Links.** Every paper links to its topic and to its 4 nearest papers by meaning. A link is kept only if
+   the pair is closer than 95% of random pairs, so the threshold suits whatever embedding model is in use.
+3. **Layout.** A 3D projection of the embeddings (PCA) gives the starting positions, and a force layout
+   settles them in the browser.
+
+Drag to rotate, scroll to zoom and right-drag to pan. Click a paper to fly to it and see its nearest papers,
+then click one of those to hop on. Click a topic, or one of the topic buttons above the map, to see its most
+upvoted and newest papers. Newer papers are a stronger teal. The map covers up to 3,000 papers (upvoted ones
+first, then the newest). It is rebuilt only when the collection changes and takes about a second on CPU.
+
 ### Interface
 
 | Component | What it is | What it does in this project | Where |
@@ -41,6 +63,8 @@ asking again; the [n] numbers stay attached to their items.
 | **Gradio** | A Python library for building web apps around ML models | Builds the whole interface: the tabs, the three-pane Ask desk, the reference list with its sort and filters, and the sieve. `gr.State` keeps the conversation per visitor without exposing it in the public API. Theme and CSS give the custom look. | `ai_news/ui.py`, `app.py` |
 | **Gradio MCP server** + **`mcp`** | Model Context Protocol support built into Gradio; `mcp` is the protocol library it needs | Exposes the search and assistant functions as tools that other AI agents, such as Claude or Cursor, can call. The tool descriptions come from the functions' docstrings. | `app.py` (`mcp_server=True`) |
 | **Google Fonts** (Newsreader, Hanken Grotesk) | Free web fonts | Newsreader, a serif made for screen reading, is used for titles, summaries and references. Hanken Grotesk is used for controls and metadata. | `ai_news/ui.py` |
+| **3d-force-graph** (with **three.js**) | A WebGL library for interactive 3D force-directed graphs, built on three.js | Draws the research map: the orbit camera, fly-to animations, hover labels and the force layout. It loads from the jsDelivr CDN at a pinned version, so it is not a Python dependency. The page fetches the map data once through a Gradio server function, so the data is not part of the public API. | `ai_news/ui.py` (`MAP_JS`) |
+| **Research map builder** | Our own code, using FAISS and NumPy | Reads the stored vectors back out of FAISS, clusters them into topics (`faiss.Kmeans`), names each topic by tf-idf over titles, links near neighbours (`IndexFlatIP`), projects to 3D with PCA and caches the result until the collection changes. | `ai_news/atlas.py` |
 | **Iframe height reporter** | A small script in the page head (`FIT_JS`) | On huggingface.co the app runs inside an iframe that only grows when the app reports its height. Gradio's own reporter can stop growing after a few quick changes (a streaming answer, fonts loading), which left the page unable to scroll. The script measures the real content height and reports it whenever it changes. | `ai_news/ui.py`, `app.py` |
 
 ### Orchestration: LangChain and LangGraph

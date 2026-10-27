@@ -16,6 +16,7 @@ from typing import Callable
 
 import gradio as gr
 
+from ai_news.atlas import collection_stats, research_map
 from ai_news.fetchers.common import parse_iso
 from ai_news.rag.state import Candidate
 from ai_news.schema import NewsItem
@@ -75,15 +76,234 @@ FIT_JS = """
 })();
 """
 
+# The research map: 3d-force-graph (three.js inside) from a CDN, pinned. The page asks the server for the map
+# with server.map_data() once it has mounted, so the ~0.5 MB of nodes stays out of the page config and the API.
+MAP_HEAD = '<script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.1/dist/3d-force-graph.min.js"></script>'
+MAP_HTML = """
+<section class="nv-map" aria-label="3D map of the papers in the collection">
+  <div class="nv-map-canvas"></div>
+  <div class="nv-map-labels" aria-hidden="true"></div>
+  <div class="nv-map-bar">
+    <input class="nv-map-find" type="search" list="nv-map-titles" placeholder="Find a paper by title"
+           aria-label="Find a paper by title"><datalist id="nv-map-titles"></datalist>
+    <button type="button" class="nv-map-reset">Reset view</button>
+  </div>
+  <p class="nv-map-hint">Drag to rotate · scroll to zoom · right-drag to pan · click a paper or a topic</p>
+  <aside class="nv-map-card" hidden aria-live="polite"></aside>
+  <p class="nv-map-msg">Loading the map…</p>
+</section>
+"""
+MAP_JS = r"""
+(async () => {
+  const root = element.querySelector('.nv-map');
+  if (!root || root.dataset.ready) return;
+  root.dataset.ready = '1';
+  const box = root.querySelector('.nv-map-canvas'), labelsEl = root.querySelector('.nv-map-labels');
+  const card = root.querySelector('.nv-map-card'), msg = root.querySelector('.nv-map-msg');
+  const find = root.querySelector('.nv-map-find');
+  const say = t => { msg.textContent = t; msg.hidden = !t; };
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  if (typeof ForceGraph3D === 'undefined') return say('The map library could not be loaded. Check your connection and reload.');
+  const probe = document.createElement('canvas');
+  if (!(probe.getContext('webgl2') || probe.getContext('webgl'))) return say('This browser has WebGL turned off, so the 3D map cannot be shown.');
+  let data;
+  try { data = await server.map_data(); } catch (e) { console.error(e); return say('The map could not be loaded. Reload the page to try again.'); }
+  if (!data) return say('The map could not be loaded. Reload the page to try again.');
+  const T = data.topics || [], P = data.papers || [];
+  if (!P.length) return say('The map appears once the collection has papers.');
+  say('');
+
+  // nodes: topic hubs first (ids "t0".."tN"), then papers (ids 0..n-1); every paper links to its hub
+  const hubs = T.map((t, g) => ({id: 't' + g, hub: true, g, label: t.label, size: t.size, x: t.pos[0], y: t.pos[1], z: t.pos[2]}));
+  const papers = P.map((p, i) => ({id: i, i, ...p, x: p.pos[0], y: p.pos[1], z: p.pos[2]}));
+  const links = papers.map(p => ({source: p.i, target: 't' + p.g, hub: true}))
+    .concat((data.links || []).map(([a, b, w]) => ({source: a, target: b, w})));
+  const near = P.map(() => []);
+  for (const [a, b, w] of data.links || []) { near[a].push([b, w]); near[b].push([a, w]); }
+  near.forEach(l => l.sort((x, y) => y[1] - x[1]));
+  const members = T.map(() => []);
+  papers.forEach(p => members[p.g] && members[p.g].push(p.i));
+  members.forEach(m => m.sort((a, b) => (P[b].v - P[a].v) || P[b].d.localeCompare(P[a].d)));
+  const list = root.querySelector('#nv-map-titles');
+  list.innerHTML = P.map(p => `<option value="${esc(p.t)}">`).join('');
+
+  // colour: papers on a teal ramp by recency (newest strongest), hubs in ink; a selection dims the rest
+  const days = P.map(p => Date.parse(p.d) || 0).filter(Boolean);
+  const d0 = Math.min(...days), d1 = Math.max(...days);
+  let pal = {};
+  const mix = (a, b, t) => {
+    const h = s => [1, 3, 5].map(k => parseInt(s.slice(k, k + 2), 16));
+    const [x, y] = [h(a), h(b)];
+    return '#' + x.map((v, k) => Math.round(v + (y[k] - v) * t).toString(16).padStart(2, '0')).join('');
+  };
+  const readPalette = () => {
+    const css = n => getComputedStyle(root).getPropertyValue(n).trim();
+    pal = {bg: css('--paper') || '#F5F7F9', ink: css('--ink') || '#1B2440', old: css('--map-old') || '#A9C9C3',
+           fresh: css('--kept') || '#0F7B6C', link: css('--map-link') || '#C9D4DD', dim: css('--map-dim') || '#DDE3EA'};
+  };
+  readPalette();
+  const age = p => d1 > d0 ? ((Date.parse(p.d) || d0) - d0) / (d1 - d0) : 1;
+  let sel = null, lit = null;  // the selected node and the set of highlighted node ids
+  const nodeColor = n => {
+    if (lit && !lit.has(n.id)) return pal.dim;
+    if (n.hub) return pal.ink;
+    if (sel === n) return pal.ink;
+    return mix(pal.old, pal.fresh, Math.pow(age(n), 1.5));
+  };
+  const nodeVal = n => (lit && !lit.has(n.id) ? 0.35 : 1) *
+    (n.hub ? 10 + Math.sqrt(n.size) * 2 : 1 + Math.log1p(n.v || 0) * 1.6);
+  const linkTouches = l => sel && (l.source === sel || l.target === sel);
+
+  const Graph = new ForceGraph3D(box, {controlType: 'orbit'})
+    .backgroundColor(pal.bg)
+    .showNavInfo(false)
+    .graphData({nodes: hubs.concat(papers), links})
+    .nodeRelSize(3.2)
+    .nodeResolution(8)
+    .nodeOpacity(0.92)
+    .nodeVal(nodeVal)
+    .nodeColor(nodeColor)
+    .nodeLabel(n => n.hub ? `<b>${esc(n.label)}</b><br>${n.size} papers · click to explore`
+                          : `<b>${esc(n.t)}</b><br>${esc(n.s)} · ${esc(n.d)}${n.v ? ' · ' + n.v + ' upvotes' : ''}`)
+    .linkColor(l => linkTouches(l) ? pal.fresh : pal.link)
+    .linkOpacity(0.35)
+    .linkWidth(l => linkTouches(l) ? 1.2 : 0)
+    .linkVisibility(l => !l.hub || linkTouches(l) || !sel)
+    .enableNodeDrag(false)
+    .warmupTicks(10)
+    .cooldownTicks(120)
+    .onNodeClick(n => n.hub ? openTopic(n.g) : openPaper(n.i))
+    .onBackgroundClick(() => clear());
+  root.graph = () => ({graph: Graph, selected: sel});  // for tests and the browser console
+  Graph.d3Force('link').distance(l => l.hub ? 70 : 22).strength(l => l.hub ? 0.06 : 0.25 + (l.w || 0) * 0.3);
+  Graph.d3Force('charge').strength(-14);
+  Graph.cameraPosition({x: 0, y: 0, z: 820});
+  let fitted = false;
+  Graph.onEngineStop(() => { if (!fitted) { fitted = true; Graph.zoomToFit(900, 30); } });
+  const repaint = () => { Graph.nodeVal(nodeVal).nodeColor(nodeColor).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkVisibility(Graph.linkVisibility()); };
+
+  // fly to a node; with the card open, slide the view so the node sits in the part the card leaves free
+  // (beside the card on wide screens, above it on phones, where the card fills the lower half)
+  const side = window.matchMedia('(min-width: 641px)');
+  const fly = n => {
+    const d = n.hub ? 340 : 170, r = Math.hypot(n.x, n.y, n.z);
+    const to = r > 1 ? {x: n.x * (1 + d / r), y: n.y * (1 + d / r), z: n.z * (1 + d / r)} : {x: n.x, y: n.y, z: n.z + d};
+    const at = {x: n.x, y: n.y, z: n.z};
+    if (!card.hidden) {
+      const W = box.clientWidth, H = box.clientHeight, cam = Graph.camera();
+      const f = [n.x - to.x, n.y - to.y, n.z - to.z].map(v => v / d);
+      let rt = [-f[2], 0, f[0]];  // right = forward × world up
+      const rl = Math.hypot(...rt) || 1;
+      rt = rt.map(v => v / rl);
+      const up = [rt[1] * f[2] - rt[2] * f[1], rt[2] * f[0] - rt[0] * f[2], rt[0] * f[1] - rt[1] * f[0]];
+      const halfH = d * Math.tan((cam.fov || 40) * Math.PI / 360), halfW = halfH * W / H;
+      const [dir, amount] = side.matches ? [rt, halfW * (card.offsetWidth + 20) / W]
+                                         : [up.map(v => -v), halfH * (card.offsetHeight + 10) / H];
+      for (const p of [to, at]) { p.x += dir[0] * amount; p.y += dir[1] * amount; p.z += dir[2] * amount; }
+    }
+    Graph.cameraPosition(to, at, 1100);
+  };
+  const paperBtn = i => `<li><button type="button" data-i="${i}">${esc(P[i].t)}</button><span>${esc(P[i].s)} · ${esc(P[i].d)}</span></li>`;
+  const show = html => { card.innerHTML = `<button type="button" class="nv-map-x" aria-label="Close">×</button>${html}`; card.hidden = false; };
+  function openPaper(i) {
+    const p = papers[i];
+    sel = p; lit = new Set([p.id, 't' + p.g, ...near[i].map(x => x[0])]);
+    repaint();
+    const nb = near[i].slice(0, 8);
+    show(`<button type="button" class="nv-map-kicker" data-g="${p.g}">${esc(T[p.g] ? T[p.g].label : '')}</button>
+      <a class="nv-map-title" href="${esc(p.u)}" target="_blank" rel="noopener">${esc(p.t)}</a>
+      <p class="nv-map-meta">${esc(p.s)} · ${esc(p.d)}${p.v ? ' · ' + p.v + ' upvotes' : ''}</p>
+      <p class="nv-map-sub">${nb.length ? 'Nearby papers' : 'No paper sits close to this one'}</p>
+      <ol>${nb.map(x => paperBtn(x[0])).join('')}</ol>`);
+    fly(p);
+  }
+  function openTopic(g) {
+    if (!T[g]) return;
+    const h = hubs[g];
+    sel = h; lit = new Set([h.id, ...members[g]]);
+    repaint();
+    show(`<p class="nv-map-kicker">Topic</p><p class="nv-map-title">${esc(T[g].label)}</p>
+      <p class="nv-map-meta">${T[g].size} papers · most upvoted and newest first</p>
+      <ol>${members[g].slice(0, 10).map(paperBtn).join('')}</ol>`);
+    fly(h);
+  }
+  function clear() { sel = null; lit = null; card.hidden = true; repaint(); }
+  card.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.classList.contains('nv-map-x')) return clear();
+    if (b.dataset.i) openPaper(+b.dataset.i);
+    else if (b.dataset.g) openTopic(+b.dataset.g);
+  });
+  root.querySelector('.nv-map-reset').addEventListener('click', () => { clear(); Graph.zoomToFit(900, 30); });
+  const go = () => {
+    const q = find.value.trim().toLowerCase();
+    if (!q) return;
+    const i = P.findIndex(p => p.t.toLowerCase() === q);
+    const j = i >= 0 ? i : P.findIndex(p => p.t.toLowerCase().includes(q));
+    if (j >= 0) openPaper(j); else show('<p class="nv-map-meta">No paper title contains that.</p>');
+  };
+  find.addEventListener('change', go);
+  find.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  // topic chips in the stats panel above fly the map to that topic
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-nv-topic]');
+    if (!b) return;
+    openTopic(+b.dataset.nvTopic);
+    root.scrollIntoView({behavior: 'smooth', block: 'center'});
+  });
+
+  // topic names float over their hubs as HTML, so they stay crisp and clickable
+  const rank = T.map((t, g) => g).sort((a, b) => T[b].size - T[a].size);
+  const labelEls = T.map((t, g) => {
+    const el = document.createElement('button');
+    el.type = 'button'; el.className = 'nv-map-label'; el.textContent = t.label; el.tabIndex = -1;
+    el.addEventListener('click', () => openTopic(g));
+    labelsEl.appendChild(el);
+    return el;
+  });
+  const top = new Set(rank.slice(0, 14));
+  const place = () => {
+    const cam = Graph.camera(), f = cam.position.clone();
+    cam.getWorldDirection(f);
+    hubs.forEach((h, g) => {
+      const el = labelEls[g], dx = h.x - cam.position.x, dy = h.y - cam.position.y, dz = h.z - cam.position.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const keep = (dx * f.x + dy * f.y + dz * f.z) > 0 && (top.has(g) || dist < 520 || sel === h) && !(lit && !lit.has(h.id));
+      if (!keep) { el.style.display = 'none'; return; }
+      const s = Graph.graph2ScreenCoords(h.x, h.y, h.z);
+      el.style.display = '';
+      el.style.transform = `translate(${s.x}px, ${s.y}px) translate(-50%, -150%)`;
+      el.style.opacity = Math.max(0.45, Math.min(1, 1.5 - dist / 1800)).toFixed(2);
+    });
+  };
+  let running = true;
+  const loop = () => { if (running) place(); requestAnimationFrame(loop); };
+  loop();
+
+  // size to the box; pause drawing while the map is hidden or scrolled away
+  const fit = () => { if (box.clientWidth) Graph.width(box.clientWidth).height(box.clientHeight); };
+  new ResizeObserver(fit).observe(box); fit();
+  new IntersectionObserver(([e]) => {
+    running = e.isIntersecting;
+    running ? Graph.resumeAnimation() : Graph.pauseAnimation();
+  }).observe(root);
+  new MutationObserver(() => { readPalette(); Graph.backgroundColor(pal.bg); repaint(); })
+    .observe(document.body, {attributes: true, attributeFilter: ['class']});
+})();
+"""
+
 CSS = """
 :root {
   --paper:#F5F7F9; --ink:#1B2440; --graphite:#5B6478; --rule:#D7DCE5; --field:#FFFFFF;
   --kept:#0F7B6C; --dropped:#B7791F;
+  --map-old:#A9C9C3; --map-link:#C3CCD8; --map-dim:#DFE4EB;
   --serif:"Newsreader", Georgia, "Times New Roman", serif;
 }
 .dark {
   --paper:#141B2D; --ink:#E6EAF2; --graphite:#9AA4B8; --rule:#2A3350; --field:#1B2338;
   --kept:#4FC7B4; --dropped:#E0A84A;
+  --map-old:#2E5559; --map-link:#33405F; --map-dim:#232C44;
 }
 .gradio-container { width:100% !important; max-width:1440px !important; margin:0 auto !important; }
 .gradio-container a { color:var(--ink); text-decoration-color:var(--rule); text-underline-offset:3px; }
@@ -234,7 +454,99 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-about code { font-size:.9em; background:color-mix(in srgb, var(--rule) 45%, transparent); padding:0 4px;
   border-radius:3px; white-space:normal; word-break:break-word; }
 
+/* landing: collection stats, papers per day, the research map */
+.nv-landing { gap:16px !important; }
+.nv-landing-in { display:flex; flex-direction:column; gap:28px; }
+.nv-tiles { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:1px;
+  background:var(--rule); border:1px solid var(--rule); border-radius:4px; overflow:hidden; margin:4px 0 0; }
+.nv-tile { background:var(--paper); padding:12px 14px; }
+.nv-tile .k { font-size:13px; color:var(--graphite); margin:0; }
+.nv-tile .v { font-family:var(--serif); font-size:27px; line-height:1.2; font-weight:500; color:var(--ink);
+  margin:2px 0 0; font-variant-numeric:tabular-nums; }
+.nv-tile .sub { font-size:13px; color:var(--graphite); margin:2px 0 0; }
+.nv-land-h { font-family:var(--serif); font-weight:500; font-size:21px; color:var(--ink); margin:0; }
+.nv-land-note { font-size:13px; color:var(--graphite); margin:2px 0 12px; max-width:68ch; }
+.nv-chart { position:relative; padding:0 0 0 2.6rem; }
+.nv-chart .grid { position:absolute; left:2.6rem; right:0; border-top:1px dashed var(--rule); }
+.nv-chart .ylab { position:absolute; left:0; width:2.2rem; text-align:right; font-size:12px; color:var(--graphite);
+  transform:translateY(-50%); font-variant-numeric:tabular-nums; }
+.nv-bars { position:relative; display:flex; align-items:flex-end; gap:2px; height:150px;
+  border-bottom:1px solid var(--graphite); }
+.nv-bar { position:relative; flex:1 1 0; height:100%; display:flex; align-items:flex-end; outline:none; }
+.nv-bar i { display:block; width:100%; background:var(--kept); border-radius:4px 4px 0 0; min-height:0; }
+.nv-bar.today i { background:color-mix(in srgb, var(--kept) 45%, transparent); }
+.nv-bar:hover i, .nv-bar:focus-visible i { filter:brightness(1.15); }
+.nv-bar .tip { display:none; position:absolute; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%);
+  z-index:3; white-space:nowrap; padding:6px 9px; border-radius:4px; font-size:13px; line-height:1.4;
+  background:var(--ink); color:var(--paper); pointer-events:none; }
+.nv-bar:first-child .tip, .nv-bar:nth-child(2) .tip, .nv-bar:nth-child(3) .tip { left:0; transform:none; }
+.nv-bar:nth-last-child(-n+3) .tip { left:auto; right:0; transform:none; }
+.nv-bar:hover .tip, .nv-bar:focus-visible .tip { display:block; }
+.nv-xlabs { position:relative; height:18px; margin-top:4px; font-size:12px; color:var(--graphite); }
+.nv-xlabs span { position:absolute; transform:translateX(-50%); white-space:nowrap; }
+.nv-xlabs span:last-child { transform:translateX(-100%); }
+.nv-chart-table { margin-top:8px; font-size:13px; color:var(--graphite); }
+.nv-chart-table summary { cursor:pointer; }
+.nv-chart-table table { border-collapse:collapse; margin-top:6px; font-variant-numeric:tabular-nums; }
+.nv-chart-table td, .nv-chart-table th { padding:2px 14px 2px 0; text-align:left; }
+.nv-topics { display:flex; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
+.nv-topics button { font-size:13px; padding:5px 10px; border:1px solid var(--rule); border-radius:999px;
+  background:var(--field); color:var(--ink); cursor:pointer; }
+.nv-topics button:hover { border-color:var(--kept); }
+.nv-topics button span { color:var(--graphite); margin-left:6px; font-variant-numeric:tabular-nums; }
+
+.nv-map { position:relative; height:560px; border:1px solid var(--rule); border-radius:4px; overflow:hidden;
+  background:var(--paper); }
+.nv-map-canvas { position:absolute; inset:0; }
+.nv-map-labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.nv-map-label { position:absolute; left:0; top:0; pointer-events:auto; cursor:pointer; white-space:nowrap;
+  font-size:12px; font-weight:600; letter-spacing:.01em; color:var(--ink); padding:2px 7px; border-radius:3px;
+  border:none; background:color-mix(in srgb, var(--paper) 78%, transparent); }
+.nv-map-label:hover { color:var(--kept); }
+.nv-map-bar { position:absolute; top:10px; left:10px; right:10px; display:flex; gap:8px; z-index:2;
+  pointer-events:none; }
+.nv-map-bar > * { pointer-events:auto; }
+@media (min-width: 641px) {  /* the open card sits on the right: keep the bar beside it */
+  .nv-map:has(.nv-map-card:not([hidden])) .nv-map-bar { right:calc(min(340px, 100% - 20px) + 20px); } }
+.nv-map-find { flex:0 1 320px; min-width:0; font-size:14px; padding:6px 10px; border:1px solid var(--rule);
+  border-radius:4px; background:var(--field); color:var(--ink); }
+.nv-map-reset { font-size:13px; padding:6px 12px; border:1px solid var(--rule); border-radius:4px;
+  background:var(--field); color:var(--ink); cursor:pointer; white-space:nowrap; }
+.nv-map-hint { position:absolute; left:10px; bottom:8px; margin:0; font-size:12px; color:var(--graphite);
+  pointer-events:none; z-index:2; }
+.nv-map-msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; margin:0;
+  font-family:var(--serif); font-size:17px; color:var(--graphite); text-align:center; padding:24px; }
+.nv-map-msg[hidden] { display:none; }
+.nv-map-card { position:absolute; top:10px; right:10px; bottom:10px; width:min(340px, calc(100% - 20px));
+  overflow-y:auto; z-index:3; padding:14px 16px; border:1px solid var(--rule); border-radius:4px; text-align:left;
+  background:color-mix(in srgb, var(--paper) 94%, transparent); }
+.nv-map-card[hidden] { display:none; }
+.nv-map-x { position:absolute; top:6px; right:8px; border:none; background:none; font-size:20px; line-height:1;
+  color:var(--graphite); cursor:pointer; padding:4px; }
+.nv-map-kicker { display:block; font-size:12px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--kept); margin:0 24px 4px 0; padding:0; border:none; background:none; text-align:left; cursor:pointer; }
+p.nv-map-kicker { cursor:default; }
+.nv-map-title { display:block; font-family:var(--serif); font-size:19px; line-height:1.3; font-weight:500;
+  color:var(--ink); margin:0 20px 0 0; text-decoration:none; text-align:left; padding:0 !important; }
+a.nv-map-title:hover { text-decoration:underline; text-decoration-color:var(--kept); }
+.nv-map-meta { font-size:13px; color:var(--graphite); margin:4px 0 0; }
+.nv-map-sub { font-size:12px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--graphite);
+  margin:14px 0 4px; }
+.nv-map-card ol { list-style:none; padding:0; margin:6px 0 0; }
+.nv-map-card li { padding:7px 0; border-top:1px solid var(--rule); }
+.nv-map-card li button { display:block; text-align:left; border:none; background:none; padding:0; cursor:pointer;
+  font-family:var(--serif); font-size:15px; line-height:1.35; color:var(--ink); }
+.nv-map-card li button:hover { color:var(--kept); }
+.nv-map-card li span { display:block; font-size:12px; color:var(--graphite); margin-top:2px; }
+.nv-map .scene-tooltip { font-family:inherit; font-size:13px; line-height:1.4; max-width:320px; white-space:normal;
+  padding:6px 9px; border-radius:4px; background:var(--ink) !important; color:var(--paper) !important; }
+
 @media (max-width: 640px) {
+  .nv-map { height:440px; }
+  .nv-map-hint { display:none; }
+  .nv-map-card { top:auto; height:55%; }
+  .nv-tiles { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .nv-tile .v { font-size:21px; }
   .nv-about table, .nv-about tbody, .nv-about tr, .nv-about td { display:block; width:auto !important; }
   .nv-about thead { display:none; }
   .nv-about tr { padding:12px 0; border-bottom:1px solid var(--rule) !important; }
@@ -318,6 +630,82 @@ def masthead_html(store: CorpusStore) -> str:
         line = (f"{s['total']:,} papers and posts from arXiv, Hugging Face Daily Papers and AI lab blogs, "
                 f"updated {ago(s['last_refresh'])}.")
     return f'<header class="nv-masthead"><h1>AI Research Navigator</h1><p>{line}</p></header>'
+
+
+# ---------------------------------------------------------------- landing: stats, papers per day, topics
+def _tile(label: str, value: str, sub: str = "") -> str:
+    sub = f'<p class="sub">{sub}</p>' if sub else ""
+    return f'<div class="nv-tile"><p class="k">{label}</p><p class="v">{value}</p>{sub}</div>'
+
+
+def _week_change(week: int, prev: int) -> str:
+    if not prev:
+        return "the first week collected" if week else ""
+    diff = week - prev
+    if diff == 0:
+        return f"same as the week before ({prev:,})"
+    pct = round(abs(diff) / prev * 100)
+    return f"{'up' if diff > 0 else 'down'} {pct}% on the week before ({prev:,})"
+
+
+def papers_chart(days: list[tuple[date, int, int]]) -> str:
+    """Papers per publication day as HTML bars (they keep real text sizes at any width), with a table view."""
+    if not days:
+        return ""
+    peak = max(p for _, p, _ in days)
+    top = max(10, math.ceil(peak / 10) * 10) if peak <= 100 else math.ceil(peak / 50) * 50
+    today = days[-1][0]
+    bars = []
+    for d, papers, posts in days:
+        posts_line = f", {_plural(posts, 'blog post')}" if posts else ""
+        tip = f"{d.strftime('%a %-d %b')}: {_plural(papers, 'paper')}{posts_line}" + \
+              (" (so far today)" if d == today else "")
+        bars.append(f'<span class="nv-bar{" today" if d == today else ""}" tabindex="0" aria-label="{tip}">'
+                    f'<i style="height:{100 * papers / top:.1f}%"></i><span class="tip">{tip}</span></span>')
+    n = len(days)
+    ticks = [i for i in range(n - 1, -1, -7)][::-1]
+    xlabs = "".join(f'<span style="left:{(i + 0.5) / n * 100:.2f}%">{days[i][0].strftime("%-d %b")}</span>'
+                    for i in ticks)
+    grid = "".join(f'<span class="grid" style="top:{100 - f * 100:.0f}%"></span>'
+                   f'<span class="ylab" style="top:{(1 - f) * 150:.0f}px">{round(top * f):,}</span>'
+                   for f in (1, 0.5))
+    total = sum(p for _, p, _ in days)
+    best = max(days, key=lambda x: x[1])
+    rows_ = "".join(f"<tr><td>{d.strftime('%a %-d %b')}</td><td>{p:,}</td><td>{b:,}</td></tr>"
+                    for d, p, b in reversed(days))
+    return (f'<div class="nv-chart" role="group" aria-label="{total:,} papers over the last {n} days, '
+            f'busiest on {best[0].strftime("%-d %b")} with {best[1]:,}">{grid}'
+            f'<div class="nv-bars">{"".join(bars)}</div><div class="nv-xlabs">{xlabs}</div></div>'
+            f'<details class="nv-chart-table"><summary>Show as a table</summary><table><thead><tr><th>Day</th>'
+            f'<th>Papers</th><th>Blog posts</th></tr></thead><tbody>{rows_}</tbody></table></details>')
+
+
+def landing_html(stats: dict, topics: list[dict]) -> str:
+    """The Ask tab before a question: collection numbers, new papers per day and the largest topics."""
+    if not stats["total"]:
+        return ('<p class="nv-hint">The collection is being gathered. Its numbers and the map of its papers '
+                'appear here once it is ready.</p>')
+    tiles = "".join([
+        _tile("In the collection", f"{stats['total']:,}"),
+        _tile("Papers", f"{stats['papers']:,}"),
+        _tile("Blog posts and news", f"{stats['posts']:,}"),
+        _tile("New in the last 7 days", f"{stats['week']:,}", _week_change(stats["week"], stats["prev_week"])),
+        _tile("Sources", f"{stats['sources']:,}"),
+        _tile("Updated", ago(stats["last_refresh"])),
+    ])
+    days = stats["days"]
+    chart = (f'<section><h2 class="nv-land-h">New papers per day</h2><p class="nv-land-note">By publication '
+             f'date, last {len(days)} days. arXiv announces nothing at weekends, so those bars stay low. '
+             f'Hover a bar for the day\'s count.</p>{papers_chart(days)}</section>')
+    biggest = sorted(enumerate(topics), key=lambda gt: -gt[1]["size"])[:8]
+    chips = "".join(f'<li><button type="button" data-nv-topic="{g}">{html.escape(t["label"])}'
+                    f'<span>{t["size"]:,}</span></button></li>' for g, t in biggest)
+    topics_html = (f'<section><h2 class="nv-land-h">Map of the papers</h2><p class="nv-land-note">Every paper is '
+                   f'a point, placed by what it is about. Papers on the same subject cluster around a topic, '
+                   f'named by its most typical title words, and each paper is linked to the papers closest to '
+                   f'it in meaning. Newer papers are a stronger teal. Pick a topic to fly there:</p>'
+                   f'<ul class="nv-topics">{chips}</ul></section>' if chips else "")
+    return f'<div class="nv-landing-in"><div class="nv-tiles">{tiles}</div>{chart}{topics_html}</div>'
 
 
 # ---------------------------------------------------------------- result rows
@@ -671,11 +1059,18 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 f'{where}</p><table><thead><tr><th>Source</th><th style="text-align:right">Items</th>'
                 f'<th>Last update</th></tr></thead><tbody>{"".join(trs)}</tbody></table></div>')
 
-    def refresh_now() -> tuple[str, str, str]:
+    def refresh_now() -> tuple[str, str, str, str]:
         """Update the collection now: fetch all sources (fetch mode, takes minutes) or download the latest
         copy from the Hugging Face dataset (pull mode)."""
         msg = refresh_fn()
-        return f'<p class="nv-hint">{html.escape(msg)}</p>', status(), masthead_html(store)
+        return f'<p class="nv-hint">{html.escape(msg)}</p>', status(), masthead_html(store), landing()
+
+    def map_data(*_) -> dict:  # Gradio passes the JS call's arguments; this takes none
+        """The research map (topics, papers, links); fetched by the map's own script, not part of the API."""
+        return research_map(store)
+
+    def landing() -> str:
+        return landing_html(collection_stats(store), research_map(store)["topics"])
 
     with gr.Blocks(title="AI Research Navigator") as demo:
         masthead = gr.HTML(masthead_html(store))
@@ -701,6 +1096,11 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         refs = gr.HTML(elem_classes="nv-flush")
                         more = gr.Button("Show more references", size="sm", variant="secondary", visible=False,
                                          elem_classes="nv-more")
+                        # shown until a question is asked; "hidden" (not False) keeps the 3D map mounted
+                        with gr.Column(elem_classes="nv-landing") as landing_col:
+                            stats = gr.HTML(elem_classes="nv-flush")
+                            gr.HTML(MAP_HTML, head=MAP_HEAD, js_on_load=MAP_JS, server_functions=[map_data],
+                                    elem_classes="nv-flush")
                     with gr.Column(scale=1, min_width=260, elem_classes="nv-steps"):
                         gr.HTML('<p class="nv-pane-h">What the assistant did</p>', elem_classes="nv-flush")
                         sieve = gr.HTML(STEPS_EMPTY, elem_classes="nv-flush")
@@ -719,6 +1119,9 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 for comp in (a_sort, a_type, a_window, a_sources):
                     comp.change(refine, view, [refs, shown, more], api_visibility="private")
                 more.click(refine_more, view + [shown], [refs, shown, more], api_visibility="private")
+                for trigger in (msg.submit, ask.click):
+                    trigger(lambda: gr.update(visible="hidden"), None, landing_col, api_visibility="private")
+                start_over.click(lambda: gr.update(visible=True), None, landing_col, api_visibility="private")
                 start_over.click(lambda: (f"<p class='nv-hint'>{ASK_EMPTY}</p>", "", STEPS_EMPTY, "", [], {},
                                           REF_PAGE, gr.update(visible=False)), None,
                                  ask_outputs + [more], api_visibility="private")
@@ -768,7 +1171,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 btn = gr.Button("Download the latest copy" if pull_mode else "Collect new items now",
                                 variant="secondary", size="sm")
                 out = gr.HTML()
-                btn.click(refresh_now, None, [out, stat, masthead]).then(
+                btn.click(refresh_now, None, [out, stat, masthead, stats]).then(
                     latest_days, None, l_day, api_visibility="private")
 
             with gr.Tab("About"):
@@ -778,4 +1181,5 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         demo.load(latest, l_inputs, feed, api_name="latest_feed")
         demo.load(status, None, stat, api_name="status")
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
+        demo.load(landing, None, stats, api_visibility="private")
     return demo
