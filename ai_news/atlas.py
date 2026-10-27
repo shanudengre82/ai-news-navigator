@@ -170,8 +170,8 @@ def research_map(store: CorpusStore, max_nodes: int = MAX_NODES) -> dict:
     return data
 
 
-def collection_stats(store: CorpusStore, days: int = 30, today: date | None = None) -> dict:
-    """Totals, this week against last week, and papers / posts per publication day (UTC)."""
+def collection_stats(store: CorpusStore, days: int = 14, today: date | None = None) -> dict:
+    """Totals, papers this week against last week, and papers / posts per publication day (UTC)."""
     today = today or datetime.now(timezone.utc).date()
     items = store.all_items()
     first = today - timedelta(days=days - 1)
@@ -183,6 +183,8 @@ def collection_stats(store: CorpusStore, days: int = 30, today: date | None = No
             continue
         if d in per_day:
             per_day[d][0 if it.source_type == "paper" else 1] += 1
+        if it.source_type != "paper":
+            continue
         age = (today - d).days
         if 0 <= age < 7:
             week += 1

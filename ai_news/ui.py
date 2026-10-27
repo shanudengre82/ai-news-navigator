@@ -93,6 +93,7 @@ MAP_HTML = """
   <p class="nv-map-msg">Loading the map…</p>
 </section>
 """
+LANDING_JS = "() => {{ document.querySelector('.nv-landing')?.classList.{op}('nv-off'); }}"
 MAP_JS = r"""
 (async () => {
   const root = element.querySelector('.nv-map');
@@ -454,11 +455,15 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-about code { font-size:.9em; background:color-mix(in srgb, var(--rule) 45%, transparent); padding:0 4px;
   border-radius:3px; white-space:normal; word-break:break-word; }
 
-/* landing: collection stats, papers per day, the research map */
+/* landing: the research map, collection stats, and new papers per day in the right-hand pane */
 .nv-landing { gap:16px !important; }
-.nv-landing-in { display:flex; flex-direction:column; gap:28px; }
-.nv-tiles { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:1px;
+.nv-landing.nv-off { display:none !important; }
+.nv-tiles { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:1px;
   background:var(--rule); border:1px solid var(--rule); border-radius:4px; overflow:hidden; margin:4px 0 0; }
+.nv-tiles.two { grid-template-columns:repeat(2, minmax(0, 1fr)); margin:0 0 10px; }
+.nv-trend { padding-bottom:18px; margin-bottom:14px; border-bottom:1px solid var(--rule); }
+.nv-trend .nv-tile .v { font-size:21px; }
+.nv-trend .nv-bar .tip { white-space:normal; width:max-content; max-width:200px; }
 .nv-tile { background:var(--paper); padding:12px 14px; }
 .nv-tile .k { font-size:13px; color:var(--graphite); margin:0; }
 .nv-tile .v { font-family:var(--serif); font-size:27px; line-height:1.2; font-weight:500; color:var(--ink);
@@ -680,8 +685,20 @@ def papers_chart(days: list[tuple[date, int, int]]) -> str:
             f'<th>Papers</th><th>Blog posts</th></tr></thead><tbody>{rows_}</tbody></table></details>')
 
 
-def landing_html(stats: dict, topics: list[dict]) -> str:
-    """The Ask tab before a question: collection numbers, new papers per day and the largest topics."""
+def map_intro_html(topics: list[dict]) -> str:
+    """The caption under the research map, with the largest topics as fly-to chips."""
+    biggest = sorted(enumerate(topics), key=lambda gt: -gt[1]["size"])[:8]
+    chips = "".join(f'<li><button type="button" data-nv-topic="{g}">{html.escape(t["label"])}'
+                    f'<span>{t["size"]:,}</span></button></li>' for g, t in biggest)
+    pick = f' Pick a topic to fly there:</p><ul class="nv-topics">{chips}</ul>' if chips else "</p>"
+    return (f'<section><h2 class="nv-land-h">Map of the papers</h2><p class="nv-land-note">Every paper is a point, '
+            f'placed by what it is about. Papers on the same subject cluster around a topic, named by its most '
+            f'typical title words, and each paper is linked to the papers closest to it in meaning. Newer papers '
+            f'are a stronger teal.{pick}</section>')
+
+
+def landing_html(stats: dict) -> str:
+    """The collection's numbers, under the research map on the Ask tab before a question."""
     if not stats["total"]:
         return ('<p class="nv-hint">The collection is being gathered. Its numbers and the map of its papers '
                 'appear here once it is ready.</p>')
@@ -689,23 +706,21 @@ def landing_html(stats: dict, topics: list[dict]) -> str:
         _tile("In the collection", f"{stats['total']:,}"),
         _tile("Papers", f"{stats['papers']:,}"),
         _tile("Blog posts and news", f"{stats['posts']:,}"),
-        _tile("New in the last 7 days", f"{stats['week']:,}", _week_change(stats["week"], stats["prev_week"])),
         _tile("Sources", f"{stats['sources']:,}"),
-        _tile("Updated", ago(stats["last_refresh"])),
     ])
+    return f'<div class="nv-tiles">{tiles}</div>'
+
+
+def trend_html(stats: dict) -> str:
+    """New papers this week against last week, and per day, for the top of the right-hand pane."""
+    if not stats["total"]:
+        return ""
     days = stats["days"]
-    chart = (f'<section><h2 class="nv-land-h">New papers per day</h2><p class="nv-land-note">By publication '
-             f'date, last {len(days)} days. arXiv announces nothing at weekends, so those bars stay low. '
-             f'Hover a bar for the day\'s count.</p>{papers_chart(days)}</section>')
-    biggest = sorted(enumerate(topics), key=lambda gt: -gt[1]["size"])[:8]
-    chips = "".join(f'<li><button type="button" data-nv-topic="{g}">{html.escape(t["label"])}'
-                    f'<span>{t["size"]:,}</span></button></li>' for g, t in biggest)
-    topics_html = (f'<section><h2 class="nv-land-h">Map of the papers</h2><p class="nv-land-note">Every paper is '
-                   f'a point, placed by what it is about. Papers on the same subject cluster around a topic, '
-                   f'named by its most typical title words, and each paper is linked to the papers closest to '
-                   f'it in meaning. Newer papers are a stronger teal. Pick a topic to fly there:</p>'
-                   f'<ul class="nv-topics">{chips}</ul></section>' if chips else "")
-    return f'<div class="nv-landing-in"><div class="nv-tiles">{tiles}</div>{chart}{topics_html}</div>'
+    tiles = (_tile("Last 7 days", f"{stats['week']:,}", _week_change(stats["week"], stats["prev_week"]))
+             + _tile("The 7 days before", f"{stats['prev_week']:,}"))
+    return (f'<section class="nv-trend"><p class="nv-pane-h">New papers, last {len(days)} days</p>'
+            f'<div class="nv-tiles two">{tiles}</div><p class="nv-land-note">Per day, by publication date. arXiv '
+            f'announces nothing at weekends, so those bars stay low.</p>{papers_chart(days)}</section>')
 
 
 # ---------------------------------------------------------------- result rows
@@ -1059,18 +1074,19 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 f'{where}</p><table><thead><tr><th>Source</th><th style="text-align:right">Items</th>'
                 f'<th>Last update</th></tr></thead><tbody>{"".join(trs)}</tbody></table></div>')
 
-    def refresh_now() -> tuple[str, str, str, str]:
+    def refresh_now() -> tuple[str, str, str]:
         """Update the collection now: fetch all sources (fetch mode, takes minutes) or download the latest
         copy from the Hugging Face dataset (pull mode)."""
         msg = refresh_fn()
-        return f'<p class="nv-hint">{html.escape(msg)}</p>', status(), masthead_html(store), landing()
+        return f'<p class="nv-hint">{html.escape(msg)}</p>', status(), masthead_html(store)
 
     def map_data(*_) -> dict:  # Gradio passes the JS call's arguments; this takes none
         """The research map (topics, papers, links); fetched by the map's own script, not part of the API."""
         return research_map(store)
 
-    def landing() -> str:
-        return landing_html(collection_stats(store), research_map(store)["topics"])
+    def landing() -> tuple[str, str, str]:
+        s = collection_stats(store)
+        return map_intro_html(research_map(store)["topics"]), landing_html(s), trend_html(s)
 
     with gr.Blocks(title="AI Research Navigator") as demo:
         masthead = gr.HTML(masthead_html(store))
@@ -1096,12 +1112,14 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         refs = gr.HTML(elem_classes="nv-flush")
                         more = gr.Button("Show more references", size="sm", variant="secondary", visible=False,
                                          elem_classes="nv-more")
-                        # shown until a question is asked; "hidden" (not False) keeps the 3D map mounted
-                        with gr.Column(elem_classes="nv-landing") as landing_col:
-                            stats = gr.HTML(elem_classes="nv-flush")
+                        # shown until a question is asked; hidden by a CSS class so the 3D map stays mounted
+                        with gr.Column(elem_classes="nv-landing"):
                             gr.HTML(MAP_HTML, head=MAP_HEAD, js_on_load=MAP_JS, server_functions=[map_data],
                                     elem_classes="nv-flush")
+                            map_intro = gr.HTML(elem_classes="nv-flush")
+                            stats = gr.HTML(elem_classes="nv-flush")
                     with gr.Column(scale=1, min_width=260, elem_classes="nv-steps"):
+                        trend = gr.HTML(elem_classes="nv-flush")  # stays while an answer is shown
                         gr.HTML('<p class="nv-pane-h">What the assistant did</p>', elem_classes="nv-flush")
                         sieve = gr.HTML(STEPS_EMPTY, elem_classes="nv-flush")
                 conv = gr.State([])
@@ -1112,6 +1130,10 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 ask_inputs = [msg, conv, a_sources, a_type, a_window, a_sort]
                 ask_outputs = [answer, refs, sieve, msg, conv, results, shown]
                 view = [results, a_sort, a_type, a_window, a_sources]
+                # hide the landing in the browser, registered first: the page runs a trigger's listeners in
+                # order and would otherwise hold this one until the answer is done
+                for trigger in (msg.submit, ask.click):
+                    trigger(None, js=LANDING_JS.format(op="add"), api_visibility="private")
                 msg.submit(assistant_fn, ask_inputs, ask_outputs).then(
                     refine, view, [refs, shown, more], api_visibility="private")
                 ask.click(assistant_fn, ask_inputs, ask_outputs, api_visibility="private").then(
@@ -1119,9 +1141,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 for comp in (a_sort, a_type, a_window, a_sources):
                     comp.change(refine, view, [refs, shown, more], api_visibility="private")
                 more.click(refine_more, view + [shown], [refs, shown, more], api_visibility="private")
-                for trigger in (msg.submit, ask.click):
-                    trigger(lambda: gr.update(visible="hidden"), None, landing_col, api_visibility="private")
-                start_over.click(lambda: gr.update(visible=True), None, landing_col, api_visibility="private")
+                start_over.click(None, js=LANDING_JS.format(op="remove"), api_visibility="private")
                 start_over.click(lambda: (f"<p class='nv-hint'>{ASK_EMPTY}</p>", "", STEPS_EMPTY, "", [], {},
                                           REF_PAGE, gr.update(visible=False)), None,
                                  ask_outputs + [more], api_visibility="private")
@@ -1171,8 +1191,9 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 btn = gr.Button("Download the latest copy" if pull_mode else "Collect new items now",
                                 variant="secondary", size="sm")
                 out = gr.HTML()
-                btn.click(refresh_now, None, [out, stat, masthead, stats]).then(
-                    latest_days, None, l_day, api_visibility="private")
+                btn.click(refresh_now, None, [out, stat, masthead]).then(
+                    latest_days, None, l_day, api_visibility="private").then(
+                    landing, None, [map_intro, stats, trend], api_visibility="private")
 
             with gr.Tab("About"):
                 gr.Markdown(ABOUT_MD, elem_classes="nv-about")
@@ -1181,5 +1202,5 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         demo.load(latest, l_inputs, feed, api_name="latest_feed")
         demo.load(status, None, stat, api_name="status")
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
-        demo.load(landing, None, stats, api_visibility="private")
+        demo.load(landing, None, [map_intro, stats, trend], api_visibility="private")
     return demo

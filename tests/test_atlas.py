@@ -6,7 +6,7 @@ from langchain_core.embeddings import DeterministicFakeEmbedding
 
 from ai_news.atlas import build_map, collection_stats, research_map
 from ai_news.store import CorpusStore
-from ai_news.ui import landing_html, papers_chart
+from ai_news.ui import landing_html, map_intro_html, papers_chart, trend_html
 from conftest import make_item
 
 TOPIC_WORDS = ["diffusion video editing", "reinforcement learning policy", "retrieval augmented generation",
@@ -69,16 +69,30 @@ def test_collection_stats(store):
     s = collection_stats(store, days=30, today=today)
     assert s["total"] == 5 and s["papers"] == 4 and s["posts"] == 1
     assert len(s["days"]) == 30 and s["days"][-1][0] == today
-    # fixture ages: 1 (blog), 2 (paper) this week; 10 (paper) last week; 40 and 200 days are outside
-    assert (s["week"], s["prev_week"]) == (2, 1)
+    # fixture ages: 1 (blog, not counted), 2 (paper) this week; 10 (paper) last week; 40 and 200 days are outside
+    assert (s["week"], s["prev_week"]) == (1, 1)
     assert sum(p for _, p, _ in s["days"]) == 2 and sum(b for _, _, b in s["days"]) == 1
 
 
 def test_landing_html(store, tmp_path):
     empty = collection_stats(CorpusStore(tmp_path / "e", DeterministicFakeEmbedding(size=8)))
-    assert "being gathered" in landing_html(empty, [])
-    out = landing_html(collection_stats(store), [{"label": "retrieval · rag", "size": 3, "pos": [0, 0, 0]}])
-    assert "New papers per day" in out and 'data-nv-topic="0"' in out and "retrieval · rag" in out
+    assert "being gathered" in landing_html(empty)
+    assert trend_html(empty) == ""
+    out = landing_html(collection_stats(store))
+    assert out.count('class="nv-tile"') == 4 and "In the collection" in out
+
+
+def test_map_intro_html():
+    out = map_intro_html([{"label": "retrieval · rag", "size": 3, "pos": [0, 0, 0]}])
+    assert "Map of the papers" in out and 'data-nv-topic="0"' in out and "retrieval · rag" in out
+    assert "nv-topics" not in map_intro_html([])
+
+
+def test_trend_html(store):
+    out = trend_html(collection_stats(store))
+    assert "last 14 days" in out and "Last 7 days" in out and "The 7 days before" in out
+    assert "same as the week before (1)" in out
+    assert len(re.findall(r'class="nv-bar[" ]', out)) == 14
 
 
 def test_papers_chart_bars_and_table():

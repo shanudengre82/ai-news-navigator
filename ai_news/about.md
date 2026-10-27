@@ -36,9 +36,9 @@ asking again; the [n] numbers stay attached to their items.
 
 ### The landing page and the research map
 
-Before you ask anything, the center of the Ask tab shows the collection itself: its size, how many items
-arrived in the last 7 days compared with the week before, a chart of new papers per day for the last 30 days,
-and a 3D map of the papers.
+Before you ask anything, the center of the Ask tab opens on a 3D map of the papers, with the collection's size
+underneath. Above the assistant's steps on the right, a chart of new papers per day covers the last 14 days,
+with this week's count compared with the week before. The chart stays there while answers are shown.
 
 The map follows Andrej Karpathy's "LLM wiki" idea, where notes link to the concept pages they belong to and to
 one another, as in Obsidian's graph view. Here the collection builds the wiki itself, with no LLM and no extra

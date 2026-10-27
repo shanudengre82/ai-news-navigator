@@ -24,7 +24,7 @@ Keep up with AI research without paying for anything. The app collects new paper
 
 - **Ask**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). You get an overall summary with citations, then every matching reference (not a fixed top-N), each with a short summary; sort and filter the list afterwards by relevance, date, upvotes, type or source. A live *sieve* on the right shows how the collection was narrowed at each step: pulled, reranked, reviewed, listed.
 - **Search**: BM25 keyword search over every match (50 at a time) with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
-- **Landing page**: before you ask, the Ask tab shows the collection's numbers, a chart of new papers per day, and a 3D map of every paper. On the map, topics are found automatically, each paper links to its nearest papers, and you can fly around and hop from paper to paper.
+- **Landing page**: before you ask, the Ask tab shows a 3D map of every paper with the collection's numbers below it, and the right-hand pane charts new papers per day over the last two weeks. On the map, topics are found automatically, each paper links to its nearest papers, and you can fly around and hop from paper to paper.
 - **Latest**: the last 10 days of papers and posts, grouped by date with the most upvoted first. Pick a day to see all of it.
 
 ## Sources (all free and open; edit `config/sources.yaml`)
@@ -72,9 +72,9 @@ asking again; the [n] numbers stay attached to their items.
 
 ### The landing page and the research map
 
-Before you ask anything, the center of the Ask tab shows the collection itself: its size, how many items
-arrived in the last 7 days compared with the week before, a chart of new papers per day for the last 30 days,
-and a 3D map of the papers.
+Before you ask anything, the center of the Ask tab opens on a 3D map of the papers, with the collection's size
+underneath. Above the assistant's steps on the right, a chart of new papers per day covers the last 14 days,
+with this week's count compared with the week before. The chart stays there while answers are shown.
 
 The map follows Andrej Karpathy's "LLM wiki" idea, where notes link to the concept pages they belong to and to
 one another, as in Obsidian's graph view. Here the collection builds the wiki itself, with no LLM and no extra
