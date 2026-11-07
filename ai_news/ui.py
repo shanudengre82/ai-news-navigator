@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import math
+import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ import gradio as gr
 
 from ai_news.atlas import collection_stats, research_map
 from ai_news.fetchers.common import parse_iso
+from ai_news.history import add_entry, find, history_html, make_entry, restore
 from ai_news.post import (DEFAULT_PICKS, LINKEDIN_LIMIT, OTHER, TOPICS, WEEK_DAYS, category_count, draft_post,
                           fold_preview, topic_matches, topic_spec)
 from ai_news.rag.state import Candidate
@@ -95,6 +97,17 @@ MAP_HTML = """
   <p class="nv-map-msg">Loading the map…</p>
 </section>
 """
+# the history panel: a click on a saved question sends its id; expanding a group stays in the browser
+HIST_JS = """
+element.addEventListener('click', e => {
+  const b = e.target.closest('[data-nv-entry]');
+  if (b) trigger('click', {entry: b.dataset.nvEntry});
+});
+"""
+HIST_CLEAR_JS = "(h) => (h && h.length && confirm('Clear all saved questions in this browser?')) ? [] : h"
+HISTORY_SECRET = os.getenv("HISTORY_SECRET", "ai-research-navigator-history")
+SAVED_STEPS = ("<div class='nv-steps-empty'>This is a saved answer, so the assistant did not run again. "
+               "Press Ask to run it fresh and see each step here.</div>")
 LANDING_JS = ("() => {{ document.querySelector('.nv-landing')?.classList.{op}('nv-off'); "
               "document.querySelector('.nv-desk')?.classList.{op}('nv-asked'); }}")
 MAP_JS = r"""
@@ -572,6 +585,28 @@ a.nv-map-title:hover { text-decoration:underline; text-decoration-color:var(--ke
 .nv-map-card li span { display:block; font-size:12px; color:var(--graphite); margin-top:2px; }
 .nv-map .scene-tooltip { font-family:inherit; font-size:13px; line-height:1.4; max-width:320px; white-space:normal;
   padding:6px 9px; border-radius:4px; background:var(--ink) !important; color:var(--paper) !important; }
+
+/* the question history, under the examples on the Ask tab */
+.nv-hist-head { align-items:center !important; justify-content:space-between !important; margin-top:20px;
+  padding-top:14px; border-top:1px solid var(--rule); flex-wrap:nowrap !important; }
+.nv-hist-h { font-family:var(--serif); font-weight:500; font-size:19px; color:var(--ink); margin:0; }
+.nv-hist-head > * { flex:0 1 auto !important; min-width:0 !important; width:auto !important; }
+button.nv-hist-clear { border:1px solid var(--rule) !important; padding:3px 10px !important; font-size:13px; }
+.nv-hist-empty { font-size:13px; color:var(--graphite); margin:4px 0 0; }
+.nv-hist details { margin:2px 0; }
+.nv-hist summary { cursor:pointer; font-size:14px; font-weight:600; color:var(--graphite); padding:6px 0;
+  list-style-position:inside; }
+.nv-hist summary .n { font-weight:400; margin-left:4px; font-variant-numeric:tabular-nums; }
+.nv-hist ul { list-style:none; margin:0 0 6px; padding:0; }
+.nv-hist-q { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:baseline; width:100%;
+  text-align:left; background:none; border:none; border-left:2px solid transparent; cursor:pointer;
+  padding:5px 4px 5px 10px; color:var(--ink); }
+.nv-hist-q .q { font-family:var(--serif); font-size:15px; font-weight:400; line-height:1.35; overflow:hidden;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.nv-hist-q .t { font-size:12px; color:var(--graphite); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.nv-hist-q:hover .q { text-decoration:underline; text-decoration-color:var(--kept); text-underline-offset:3px; }
+.nv-hist-q.on { border-left-color:var(--kept); background:color-mix(in srgb, var(--kept) 8%, transparent); }
+.nv-hist-q:focus-visible { outline:2px solid var(--kept); outline-offset:1px; }
 
 /* the Post tab: pick list on the left, the editable post on the right */
 .nv-post-head { font-size:15px; color:var(--graphite); margin:4px 0 8px; max-width:60ch; }
@@ -1092,6 +1127,29 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         return (references_html(refs, sort, source_type, window, sources, shown, (results or {}).get("summarized", 0)),
                 shown, gr.update(visible=has_more(refs, shown, sort, source_type, window, sources)))
 
+    def render_history(hist: list, tz: int, active: str | None = None) -> str:
+        return history_html(hist, tz_offset_min=int(tz or 0), active=active)
+
+    def save_history(conv: list, results: dict, hist: list, tz: int):
+        """After an answer: keep the question, the answer and a compact copy of its references."""
+        turns = [m for m in conv or [] if isinstance(m, dict)]
+        if len(turns) < 2 or turns[-1].get("role") != "assistant" or not (results or {}).get("refs"):
+            return hist, render_history(hist, tz), None  # nothing to keep (an error, or no references)
+        entry = make_entry(str(turns[-2].get("content", "")), str(turns[-1].get("content", "")), results)
+        hist = add_entry(hist, entry)
+        return hist, render_history(hist, tz, entry["id"]), entry["id"]
+
+    def restore_history(evt: gr.EventData, hist: list, tz: int):
+        """A saved question was clicked: bring back its answer and references without running the model."""
+        entry = find(hist, str(getattr(evt, "entry", "") or (evt._data or {}).get("entry", "")))
+        if entry is None:
+            return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                    render_history(hist, tz), None)
+        body, saved, conv, note = restore(entry, int(tz or 0))
+        return (answer_md(entry["q"], body, [], note), references_html(saved["refs"], shown=REF_PAGE,
+                                                                       summarized=saved["summarized"]),
+                SAVED_STEPS, entry["q"], conv, saved, REF_PAGE, render_history(hist, tz, entry["id"]), entry["id"])
+
     def refine_more(results, sort, source_type, window, sources, shown):
         return refine(results, sort, source_type, window, sources, int(shown or 0) + REF_PAGE)
 
@@ -1223,6 +1281,10 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         ask = gr.Button("Ask", variant="primary")
                         gr.HTML(f'<p class="nv-idle-note">{ASK_EMPTY}</p>', elem_classes=["nv-flush", "nv-idle"])
                         gr.Examples(EXAMPLES, inputs=msg, label="Or try one of these")
+                        with gr.Row(elem_classes="nv-hist-head"):
+                            gr.HTML('<h2 class="nv-hist-h">Your questions</h2>', elem_classes="nv-flush")
+                            hist_clear = gr.Button("Clear", size="sm", variant="secondary", elem_classes="nv-hist-clear")
+                        hist_view = gr.HTML(history_html([]), js_on_load=HIST_JS, elem_classes="nv-flush")
                         with gr.Column(elem_classes="nv-refine"):
                             gr.HTML('<p class="nv-pane-h">Refine the list</p>', elem_classes="nv-flush")
                             a_sort = gr.Dropdown(REF_SORTS, value="relevance", label="Sort by")
@@ -1251,6 +1313,12 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 conv = gr.State([])
                 results = gr.State({})
                 shown = gr.State(REF_PAGE)
+                # the question history lives in the visitor's browser (localStorage), never on the server
+                # a fixed key: Gradio's default is random per start, which would wipe every visitor's history
+                # whenever the Space restarts. The data never leaves the visitor's browser either way.
+                hist = gr.BrowserState([], storage_key="nv-ask-history", secret=HISTORY_SECRET)
+                hist_active = gr.State(None)
+                tz = gr.State(0)  # the browser's getTimezoneOffset(), to group by the visitor's own days
                 # History and results live in gr.State: hidden from the API/MCP schema, so callers only pass
                 # (message, sources, source_type, window, sort) and can't send a malformed chat history.
                 ask_inputs = [msg, conv, a_sources, a_type, a_window, a_sort]
@@ -1260,17 +1328,27 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 # order and would otherwise hold this one until the answer is done
                 for trigger in (msg.submit, ask.click):
                     trigger(None, js=LANDING_JS.format(op="add"), api_visibility="private")
+                save = ([conv, results, hist, tz], [hist, hist_view, hist_active])
                 msg.submit(assistant_fn, ask_inputs, ask_outputs).then(
-                    refine, view, [refs, shown, more], api_visibility="private")
+                    refine, view, [refs, shown, more], api_visibility="private").then(
+                    save_history, *save, api_visibility="private")
                 ask.click(assistant_fn, ask_inputs, ask_outputs, api_visibility="private").then(
+                    refine, view, [refs, shown, more], api_visibility="private").then(
+                    save_history, *save, api_visibility="private")
+                hist_view.click(None, js=LANDING_JS.format(op="add"), api_visibility="private")
+                hist_view.click(restore_history, [hist, tz], ask_outputs + [hist_view, hist_active],
+                                api_visibility="private").then(
                     refine, view, [refs, shown, more], api_visibility="private")
+                hist_clear.click(None, [hist], [hist], js=HIST_CLEAR_JS, api_visibility="private").then(
+                    render_history, [hist, tz], hist_view, api_visibility="private")
                 for comp in (a_sort, a_type, a_window, a_sources):
                     comp.change(refine, view, [refs, shown, more], api_visibility="private")
                 more.click(refine_more, view + [shown], [refs, shown, more], api_visibility="private")
                 start_over.click(None, js=LANDING_JS.format(op="remove"), api_visibility="private")
                 start_over.click(lambda: ("", "", STEPS_EMPTY, "", [], {},
                                           REF_PAGE, gr.update(visible=False)), None,
-                                 ask_outputs + [more], api_visibility="private")
+                                 ask_outputs + [more], api_visibility="private").then(
+                    render_history, [hist, tz], hist_view, api_visibility="private")
 
             with gr.Tab("Search"):
                 q = gr.Textbox(placeholder='Keywords, e.g. diffusion "video editing"', show_label=False,
@@ -1370,4 +1448,6 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
         demo.load(landing, None, [map_intro, stats, trend], api_visibility="private")
         demo.load(post_topic, topic_in, topic_out, api_visibility="private")
+        demo.load(None, None, tz, js="() => new Date().getTimezoneOffset()", api_visibility="private").then(
+            render_history, [hist, tz], hist_view, api_visibility="private")
     return demo
