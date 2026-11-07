@@ -39,4 +39,4 @@ def test_about_tab_is_in_the_ui(tmp_path):
     demo = build_ui(CorpusStore(tmp_path, DeterministicFakeEmbedding(size=8)), ["arXiv"],
                     lambda *a: None, lambda: "")
     labels = [b.label for b in demo.blocks.values() if type(b).__name__ == "Tab"]
-    assert labels == ["Ask", "Search", "Latest", "Sources", "About"]
+    assert labels == ["Ask", "Search", "Latest", "Post", "Sources", "About"]

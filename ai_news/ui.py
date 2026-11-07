@@ -18,6 +18,8 @@ import gradio as gr
 
 from ai_news.atlas import collection_stats, research_map
 from ai_news.fetchers.common import parse_iso
+from ai_news.post import (DEFAULT_PICKS, LINKEDIN_LIMIT, OTHER, TOPICS, WEEK_DAYS, category_count, draft_post,
+                          fold_preview, topic_matches, topic_spec)
 from ai_news.rag.state import Candidate
 from ai_news.schema import NewsItem
 from ai_news.search import DATE_WINDOWS, highlight, keyword_search
@@ -571,6 +573,24 @@ a.nv-map-title:hover { text-decoration:underline; text-decoration-color:var(--ke
 .nv-map .scene-tooltip { font-family:inherit; font-size:13px; line-height:1.4; max-width:320px; white-space:normal;
   padding:6px 9px; border-radius:4px; background:var(--ink) !important; color:var(--paper) !important; }
 
+/* the Post tab: pick list on the left, the editable post on the right */
+.nv-post-head { font-size:15px; color:var(--graphite); margin:4px 0 8px; max-width:60ch; }
+.nv-picks label { align-items:flex-start !important; width:100%; padding:8px 4px !important;
+  border-top:1px solid var(--rule); border-radius:0 !important; background:transparent !important; }
+.nv-picks label span { font-family:var(--serif); font-size:16px; line-height:1.4; color:var(--ink); }
+.nv-picks .wrap { gap:0 !important; flex-direction:column; }
+.nv-post-text textarea { font-size:15px !important; line-height:1.55 !important; }
+.nv-post-meta p { font-size:13px; line-height:1.5; color:var(--graphite); margin:6px 0 0; max-width:68ch; }
+.nv-post-meta q { color:var(--ink); }
+.nv-post-meta .over { color:var(--dropped); font-weight:600; }
+/* when the panes stack, the ready-made post comes first and the list to adjust it follows */
+@media (max-width: 720px) { .nv-post-out { order:-1; } }
+.nv-post-actions { justify-content:flex-start !important; gap:10px !important; }
+.nv-post-actions button { flex:0 0 auto !important; width:auto !important; min-width:0 !important;
+  border:1px solid var(--rule) !important; padding:6px 14px !important; font-size:13px; }
+.nv-post-actions button:hover { border-color:var(--kept) !important; }
+.nv-post-note { font-size:13px; color:var(--graphite); margin:6px 0 0; max-width:68ch; }
+
 @media (max-width: 640px) {
   .nv-map { height:440px; }
   .nv-map-hint { display:none; }
@@ -1002,8 +1022,42 @@ def answer_md(question: str, body: str, earlier: list[tuple[str, str]], note: st
 
 
 # ---------------------------------------------------------------- layout
+# ---------------------------------------------------------------- the Post tab: a weekly LinkedIn roundup
+POST_INTRO = ("Pick a topic to get a LinkedIn post about its papers and blog posts from the last 7 days. "
+              "Tick or untick items to change the post, edit the text if you like, then copy it.")
+
+
+def pick_label(it: NewsItem) -> str:
+    """One line per item in the pick list: kind, title, then where and when."""
+    kind = "●" if it.source_type == "paper" else "◆"
+    up = f", {it.upvotes} upvote{'s' if it.upvotes != 1 else ''}" if it.upvotes else ""
+    return f"{kind} {it.title} ({it.source}, {human_date(it.published)}{up})"
+
+
+def picks_head(n: int, topic: str) -> str:
+    if not topic:
+        return '<p class="nv-post-head">Type a topic and press Enter.</p>'
+    if not n:
+        return (f'<p class="nv-post-head">Nothing on {html.escape(topic)} from the last {WEEK_DAYS} days. '
+                f'Try a broader topic, or add items with the search below.</p>')
+    return (f'<p class="nv-post-head">The {n} closest matches from the last {WEEK_DAYS} days, best first. '
+            f'The top {min(n, DEFAULT_PICKS)} are in the post.</p>')
+
+
+def post_meta_html(text: str, note: str = "") -> str:
+    """Length against LinkedIn's limit, what shows before "see more", and any note from the last action."""
+    n = len(text or "")
+    over = n > LINKEDIN_LIMIT
+    count = (f'<span class="{"over" if over else ""}">{n:,} of {LINKEDIN_LIMIT:,} characters'
+             f'{" — shorten it before posting" if over else ""}.</span>')
+    fold = (f' Readers see this before "see more": <q>{html.escape(fold_preview(text))}</q>' if text else "")
+    note = f'<p class="nv-post-note">{html.escape(note)}</p>' if note else ""
+    return f'<div class="nv-post-meta"><p>{count}{fold}</p>{note}</div>'
+
+
 def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable,
-             refresh_fn: Callable[[], str], pull_mode: bool = False) -> gr.Blocks:
+             refresh_fn: Callable[[], str], pull_mode: bool = False,
+             polish_fn: Callable[[str], tuple[str, str]] | None = None) -> gr.Blocks:
 
     def search(query: str, sources: list[str], source_type: str, window: str, sort: str) -> str:
         """Keyword (BM25) search over collected AI papers and posts. Quote a phrase to require it verbatim.
@@ -1108,6 +1162,56 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         s = collection_stats(store)
         return map_intro_html(research_map(store)["topics"]), landing_html(s), trend_html(s)
 
+    def _picked(ids: list[str]) -> list[NewsItem]:
+        with store._lock:
+            return [store.items[i] for i in ids if i in store.items]
+
+    def _post_for(topic: str, custom: str, picked_ids: list[str], shown: list[str]) -> str:
+        name, spec = topic_spec(topic, custom)
+        order = {i: n for n, i in enumerate(shown)}  # the post follows the list's order, not click order
+        ids = sorted((i for i in picked_ids or [] if i in order), key=order.get)
+        return draft_post(name, _picked(ids), spec["tags"], category_count(store, spec["categories"]))
+
+    def post_topic(topic: str, custom: str):
+        """A topic was picked: list the week's best matches, tick the top few and draft the post."""
+        name, spec = topic_spec(topic, custom)
+        matches = [it for it, _ in topic_matches(store, spec["query"], spec["categories"])] if name else []
+        shown = [it.id for it in matches]
+        picked = shown[:DEFAULT_PICKS]
+        text = _post_for(topic, custom, picked, shown)
+        return (picks_head(len(shown), name), gr.update(choices=[(pick_label(it), it.id) for it in matches],
+                                                        value=picked),
+                shown, text, post_meta_html(text))
+
+    def post_rebuild(topic: str, custom: str, picked_ids: list[str], shown: list[str]):
+        text = _post_for(topic, custom, picked_ids, shown)
+        return text, post_meta_html(text)
+
+    def post_find(query: str, picked_ids: list[str], shown: list[str]):
+        """Add this week's keyword matches to the end of the list, unticked."""
+        found = [it for it, _ in keyword_search(store, query, days=WEEK_DAYS, limit=10)] if query.strip() else []
+        new = [it.id for it in found if it.id not in shown]
+        shown = shown + new
+        note = (f"Added {len(new)} from this week to the end of the list; tick them to use them." if new else
+                "Nothing new from this week matches that." if query.strip() else "")
+        return (gr.update(choices=[(pick_label(it), it.id) for it in _picked(shown)], value=picked_ids or []),
+                shown, "" if new else query, f'<p class="nv-post-note">{html.escape(note)}</p>' if note else "")
+
+    def post_polish(text: str):
+        if polish_fn is None:
+            return text, post_meta_html(text, "Rewriting needs the AI model, which is not loaded here.")
+        out, note = polish_fn(text)
+        return out, post_meta_html(out, note or "Rewritten with AI. Check it before posting.")
+
+    def weekly_post(topic: str = "Computer vision") -> str:
+        """A ready-to-post LinkedIn roundup of the last 7 days' papers and blog posts on a topic.
+
+        Args:
+            topic: one of the preset topics (e.g. "Computer vision", "Time series forecasting") or any free text
+        """
+        preset = topic if topic in TOPICS else OTHER
+        return post_topic(preset, topic)[3]
+
     with gr.Blocks(title="AI Research Navigator") as demo:
         masthead = gr.HTML(masthead_html(store))
         with gr.Tabs():
@@ -1208,6 +1312,45 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         latest_reset, l_inputs, [l_shown, l_more], api_visibility="private")
                 l_more.click(latest_more, l_inputs + [l_shown], [feed, l_shown, l_more], api_visibility="private")
 
+            with gr.Tab("Post"):
+                gr.HTML(f'<p class="nv-hint">{POST_INTRO}</p>', elem_classes="nv-flush")
+                with gr.Row(elem_classes="nv-post-topics", equal_height=False):
+                    p_topic = gr.Radio(list(TOPICS) + [OTHER], value=next(iter(TOPICS)), label="Topic", scale=4)
+                    p_custom = gr.Textbox(label="Your topic", placeholder="e.g. protein design, then press Enter",
+                                          visible=False, scale=1, min_width=240)
+                with gr.Row(elem_classes="nv-desk nv-post", equal_height=False):
+                    with gr.Column(scale=1, min_width=320, elem_classes="nv-post-list"):
+                        p_head = gr.HTML(elem_classes="nv-flush")
+                        p_find = gr.Textbox(label="Add more from this week",
+                                            placeholder="Keywords, e.g. gaussian splatting", submit_btn="Find")
+                        p_found = gr.HTML(elem_classes="nv-flush")
+                        p_picks = gr.CheckboxGroup([], value=[], show_label=False, elem_classes="nv-picks")
+                    with gr.Column(scale=1, min_width=320, elem_classes="nv-post-out"):
+                        p_text = gr.Textbox(label="Your post", lines=20, max_lines=48, buttons=["copy"],
+                                            elem_classes="nv-post-text")
+                        p_meta = gr.HTML(post_meta_html(""), elem_classes="nv-flush")
+                        with gr.Row(elem_classes="nv-post-actions"):
+                            p_polish = gr.Button("Rewrite with AI", variant="secondary", size="sm",
+                                                 visible=polish_fn is not None)
+                            p_rebuild = gr.Button("Rebuild from the list", variant="secondary", size="sm")
+                        gr.HTML('<p class="nv-post-note">Ticking or unticking items rebuilds the post, so make '
+                                'text edits last.</p>', elem_classes="nv-flush")
+                p_shown = gr.State([])
+                topic_in = [p_topic, p_custom]
+                topic_out = [p_head, p_picks, p_shown, p_text, p_meta]
+                p_topic.change(lambda t: gr.update(visible=t == OTHER), p_topic, p_custom, api_visibility="private")
+                p_topic.change(post_topic, topic_in, topic_out, api_visibility="private")
+                p_custom.submit(post_topic, topic_in, topic_out, api_visibility="private")
+                p_picks.input(post_rebuild, topic_in + [p_picks, p_shown], [p_text, p_meta],
+                              api_visibility="private")
+                p_rebuild.click(post_rebuild, topic_in + [p_picks, p_shown], [p_text, p_meta],
+                                api_visibility="private")
+                p_find.submit(post_find, [p_find, p_picks, p_shown], [p_picks, p_shown, p_find, p_found],
+                              api_visibility="private")
+                p_text.input(lambda t: post_meta_html(t), p_text, p_meta, api_visibility="private")
+                p_polish.click(post_polish, p_text, [p_text, p_meta], api_visibility="private")
+                gr.api(weekly_post, api_name="weekly_post")
+
             with gr.Tab("Sources"):
                 stat = gr.HTML()
                 btn = gr.Button("Download the latest copy" if pull_mode else "Collect new items now",
@@ -1215,7 +1358,8 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 out = gr.HTML()
                 btn.click(refresh_now, None, [out, stat, masthead]).then(
                     latest_days, None, l_day, api_visibility="private").then(
-                    landing, None, [map_intro, stats, trend], api_visibility="private")
+                    landing, None, [map_intro, stats, trend], api_visibility="private").then(
+                    post_topic, topic_in, topic_out, api_visibility="private")
 
             with gr.Tab("About"):
                 gr.Markdown(ABOUT_MD, elem_classes="nv-about")
@@ -1225,4 +1369,5 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         demo.load(status, None, stat, api_name="status")
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
         demo.load(landing, None, [map_intro, stats, trend], api_visibility="private")
+        demo.load(post_topic, topic_in, topic_out, api_visibility="private")
     return demo

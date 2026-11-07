@@ -21,6 +21,8 @@ from ai_news.rag.nodes import RagNodes  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
 from ai_news import scheduler  # noqa: E402
 from ai_news.assistant import message_text, render, run_events  # noqa: E402
+from ai_news.post import keep_links  # noqa: E402
+from ai_news.rag.prompts import POLISH  # noqa: E402
 from ai_news.ui import CSS, FIT_JS, FONTS_HEAD, REF_PAGE, STEPS_EMPTY, build_ui, theme  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -92,7 +94,27 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
     yield from render(_guarded(_assistant_gpu(message, history_texts, {})), history, message, view)
 
 
-demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh, pull_mode=settings.refresh_mode == "pull")
+@spaces.GPU(duration=60)
+def _polish_gpu(draft: str) -> str:
+    """Runs in the ZeroGPU worker: one LLM call that rewrites the weekly post."""
+    from langchain_core.messages import HumanMessage
+    return str(llm.invoke([HumanMessage(content=POLISH.format(draft=draft))]).content)
+
+
+def polish_post(draft: str) -> tuple[str, str]:
+    """Rewrite a draft post with the LLM; returns (text, note). Keeps the draft if the rewrite fails or drops a
+    link, and says why in the note."""
+    if not draft or not draft.strip():
+        return draft, "Build a draft first."
+    try:
+        return keep_links(draft, _polish_gpu(draft))
+    except Exception as e:
+        log.exception("ZeroGPU rewrite failed")
+        return draft, f"The rewrite did not run ({type(e).__name__}). The draft is unchanged; try again later."
+
+
+demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh, pull_mode=settings.refresh_mode == "pull",
+                polish_fn=polish_post)
 
 if settings.refresh_hours > 0:
     scheduler.start(run_refresh, settings.refresh_hours,

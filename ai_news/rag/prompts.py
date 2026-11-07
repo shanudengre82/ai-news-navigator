@@ -42,3 +42,15 @@ say together about the request: the main approaches, how they differ, and any co
 Cite sources inline as [1], [2]. End with one final sentence that begins with "**Start with** [n]" and says
 why that source is the best one to read first.
 Do not invent sources, numbers, or links. If the sources only partly cover the request, say so."""
+
+POLISH = """Rewrite this draft LinkedIn post about recent AI research so it reads naturally and is specific.
+
+Rules:
+- Keep every listed paper or post, its title and its link exactly as written, in the same order.
+- Use only facts in the draft. Do not invent results, numbers, names or claims.
+- Plain, confident language for practitioners; no hype words, at most two emoji.
+- At most 2,200 characters. Keep the hashtags on the last line.
+- Return only the post text, nothing before or after it.
+
+Draft:
+{draft}"""

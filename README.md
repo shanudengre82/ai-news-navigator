@@ -24,8 +24,9 @@ Keep up with AI research without paying for anything. The app collects new paper
 
 - **Ask**: an agentic RAG pipeline in **LangGraph**, using **LangChain** components and an open LLM (Qwen2.5-7B-Instruct on ZeroGPU). You get an overall summary with citations, then every matching reference (not a fixed top-N), each with a short summary; sort and filter the list afterwards by relevance, date, upvotes, type or source. A live *sieve* on the right shows how the collection was narrowed at each step: pulled, reranked, reviewed, listed.
 - **Search**: BM25 keyword search over every match (50 at a time) with filters for source, type, date and sort order. Put a phrase in `"quotes"` to require it word for word.
-- **Landing page**: before you ask, the Ask tab shows a 3D map of every paper with the collection's numbers below it, and the right-hand pane charts new papers per day over the last two weeks. On the map, topics are found automatically, each paper links to its nearest papers, and you can fly around and hop from paper to paper.
+- **Landing page**: before you ask, the Ask tab shows a 3D map of every paper. Under it, a strip of new papers per day over the last two weeks doubles as the map's colour key (newer papers are a stronger teal); pick a day to light its papers on the map. Topics are found automatically, each paper links to its nearest papers, and you can fly around and hop from paper to paper.
 - **Latest**: the last 10 days of papers and posts, grouped by date with the most upvoted first. Pick a day to see all of it.
+- **Post**: pick a topic (computer vision, time series forecasting, AI agents… or your own) and get a ready-to-post LinkedIn roundup of its papers and blog posts from the last 7 days. Tick or untick items, add more by keyword, edit the text and copy it; *Rewrite with AI* polishes the draft with the same open LLM. Also available as the `weekly_post` API/MCP tool.
 
 ## Sources (all free and open; edit `config/sources.yaml`)
 | Kind | Sources |
