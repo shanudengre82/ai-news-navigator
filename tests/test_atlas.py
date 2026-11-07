@@ -78,8 +78,7 @@ def test_landing_html(store, tmp_path):
     empty = collection_stats(CorpusStore(tmp_path / "e", DeterministicFakeEmbedding(size=8)))
     assert "being gathered" in landing_html(empty)
     assert trend_html(empty) == ""
-    out = landing_html(collection_stats(store))
-    assert out.count('class="nv-tile"') == 4 and "In the collection" in out
+    assert landing_html(collection_stats(store)) == ""  # the map and the strip speak once there are items
 
 
 def test_map_intro_html():
@@ -90,9 +89,17 @@ def test_map_intro_html():
 
 def test_trend_html(store):
     out = trend_html(collection_stats(store))
-    assert "last 14 days" in out and "Last 7 days" in out and "The 7 days before" in out
-    assert "same as the week before (1)" in out
-    assert len(re.findall(r'class="nv-bar[" ]', out)) == 14
+    assert "last 14 days" in out and "1 new paper in the last 7 days, same as the week before (1)." in out
+    assert "Busiest day:" in out and "nv-tile" not in out
+    assert len(re.findall(r'class="nv-bar[" ]', out)) == 14 and out.count("data-nv-day=") == 14
+
+
+def test_trend_html_with_nothing_new(store):
+    stats = collection_stats(store)
+    stats["days"] = [(d, 0, b) for d, _, b in stats["days"]]
+    stats["week"] = stats["prev_week"] = 0
+    out = trend_html(stats)
+    assert "No new papers in the last 14 days. The newest is from" in out and "nv-bar" not in out
 
 
 def test_papers_chart_bars_and_table():
@@ -101,3 +108,4 @@ def test_papers_chart_bars_and_table():
     assert len(re.findall(r'class="nv-bar[" ]', out)) == 14
     assert "so far today" in out  # the last day is today, still filling
     assert "<table>" in out
+    assert 'data-nv-day="2026-10-01"' in out and "--tone:0%" in out and "--tone:100%" in out

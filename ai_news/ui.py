@@ -33,7 +33,7 @@ EXAMPLES = [
 ]
 ABOUT_MD = Path(__file__).with_name("about.md").read_text(encoding="utf-8")
 ASK_PLACEHOLDER = "What do you want to read about?"
-ASK_EMPTY = ("Ask a question above. The assistant searches the collection, keeps only what is relevant, "
+ASK_EMPTY = ("The assistant searches the collection, keeps only what is relevant, "
              "and gives you a short reading list with the reason for each pick.")
 
 FONTS_HEAD = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
@@ -88,12 +88,13 @@ MAP_HTML = """
            aria-label="Find a paper by title"><datalist id="nv-map-titles"></datalist>
     <button type="button" class="nv-map-reset">Reset view</button>
   </div>
-  <p class="nv-map-hint">Drag to rotate · scroll to zoom · right-drag to pan · click a paper or a topic</p>
+  <p class="nv-map-hint">Drag to turn, scroll to zoom, right-drag to pan. Click a paper or a topic.</p>
   <aside class="nv-map-card" hidden aria-live="polite"></aside>
   <p class="nv-map-msg">Loading the map…</p>
 </section>
 """
-LANDING_JS = "() => {{ document.querySelector('.nv-landing')?.classList.{op}('nv-off'); }}"
+LANDING_JS = ("() => {{ document.querySelector('.nv-landing')?.classList.{op}('nv-off'); "
+              "document.querySelector('.nv-desk')?.classList.{op}('nv-asked'); }}")
 MAP_JS = r"""
 (async () => {
   const root = element.querySelector('.nv-map');
@@ -103,6 +104,7 @@ MAP_JS = r"""
   const card = root.querySelector('.nv-map-card'), msg = root.querySelector('.nv-map-msg');
   const find = root.querySelector('.nv-map-find');
   const say = t => { msg.textContent = t; msg.hidden = !t; };
+  const meta = p => [p.s, p.d].concat(p.v ? [p.v + (p.v === 1 ? ' upvote' : ' upvotes')] : []).map(esc).join(', ');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   if (typeof ForceGraph3D === 'undefined') return say('The map library could not be loaded. Check your connection and reload.');
   const probe = document.createElement('canvas');
@@ -130,7 +132,9 @@ MAP_JS = r"""
 
   // colour: papers on a teal ramp by recency (newest strongest), hubs in ink; a selection dims the rest
   const days = P.map(p => Date.parse(p.d) || 0).filter(Boolean);
-  const d0 = Math.min(...days), d1 = Math.max(...days);
+  // the same 14 days as the strip under the map, ending today (UTC): older papers stay pale
+  const DAY = 864e5, now = new Date(), d1 = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const d0 = d1 - 13 * DAY;
   let pal = {};
   const mix = (a, b, t) => {
     const h = s => [1, 3, 5].map(k => parseInt(s.slice(k, k + 2), 16));
@@ -143,7 +147,7 @@ MAP_JS = r"""
            fresh: css('--kept') || '#0F7B6C', link: css('--map-link') || '#C9D4DD', dim: css('--map-dim') || '#DDE3EA'};
   };
   readPalette();
-  const age = p => d1 > d0 ? ((Date.parse(p.d) || d0) - d0) / (d1 - d0) : 1;
+  const age = p => Math.min(1, Math.max(0, ((Date.parse(p.d) || d0) - d0) / (d1 - d0)));
   let sel = null, lit = null;  // the selected node and the set of highlighted node ids
   const nodeColor = n => {
     if (lit && !lit.has(n.id)) return pal.dim;
@@ -164,8 +168,8 @@ MAP_JS = r"""
     .nodeOpacity(0.92)
     .nodeVal(nodeVal)
     .nodeColor(nodeColor)
-    .nodeLabel(n => n.hub ? `<b>${esc(n.label)}</b><br>${n.size} papers · click to explore`
-                          : `<b>${esc(n.t)}</b><br>${esc(n.s)} · ${esc(n.d)}${n.v ? ' · ' + n.v + ' upvotes' : ''}`)
+    .nodeLabel(n => n.hub ? `<b>${esc(n.label)}</b><br>${n.size} papers, click to explore`
+                          : `<b>${esc(n.t)}</b><br>${meta(n)}`)
     .linkColor(l => linkTouches(l) ? pal.fresh : pal.link)
     .linkOpacity(0.35)
     .linkWidth(l => linkTouches(l) ? 1.2 : 0)
@@ -204,16 +208,16 @@ MAP_JS = r"""
     }
     Graph.cameraPosition(to, at, 1100);
   };
-  const paperBtn = i => `<li><button type="button" data-i="${i}">${esc(P[i].t)}</button><span>${esc(P[i].s)} · ${esc(P[i].d)}</span></li>`;
+  const paperBtn = i => `<li><button type="button" data-i="${i}">${esc(P[i].t)}</button><span>${meta(P[i])}</span></li>`;
   const show = html => { card.innerHTML = `<button type="button" class="nv-map-x" aria-label="Close">×</button>${html}`; card.hidden = false; };
   function openPaper(i) {
     const p = papers[i];
     sel = p; lit = new Set([p.id, 't' + p.g, ...near[i].map(x => x[0])]);
-    repaint();
+    repaint(); markDay(null);
     const nb = near[i].slice(0, 8);
     show(`<button type="button" class="nv-map-kicker" data-g="${p.g}">${esc(T[p.g] ? T[p.g].label : '')}</button>
       <a class="nv-map-title" href="${esc(p.u)}" target="_blank" rel="noopener">${esc(p.t)}</a>
-      <p class="nv-map-meta">${esc(p.s)} · ${esc(p.d)}${p.v ? ' · ' + p.v + ' upvotes' : ''}</p>
+      <p class="nv-map-meta">${meta(p)}</p>
       <p class="nv-map-sub">${nb.length ? 'Nearby papers' : 'No paper sits close to this one'}</p>
       <ol>${nb.map(x => paperBtn(x[0])).join('')}</ol>`);
     fly(p);
@@ -222,13 +226,29 @@ MAP_JS = r"""
     if (!T[g]) return;
     const h = hubs[g];
     sel = h; lit = new Set([h.id, ...members[g]]);
-    repaint();
+    repaint(); markDay(null);
     show(`<p class="nv-map-kicker">Topic</p><p class="nv-map-title">${esc(T[g].label)}</p>
-      <p class="nv-map-meta">${T[g].size} papers · most upvoted and newest first</p>
+      <p class="nv-map-meta">${T[g].size} papers, most upvoted and newest first</p>
       <ol>${members[g].slice(0, 10).map(paperBtn).join('')}</ol>`);
     fly(h);
   }
-  function clear() { sel = null; lit = null; card.hidden = true; repaint(); }
+  function openDay(day, label) {
+    const ids = papers.filter(p => p.d === day).map(p => p.i)
+      .sort((a, b) => (P[b].v - P[a].v) || P[a].t.localeCompare(P[b].t));
+    sel = null; lit = new Set(ids);
+    repaint(); markDay(day);
+    show(`<p class="nv-map-kicker">Published on</p><p class="nv-map-title">${esc(label || day)}</p>
+      <p class="nv-map-meta">${ids.length ? ids.length + (ids.length === 1 ? ' paper' : ' papers') + ' on the map, most upvoted first'
+                                           : 'No paper from this day is on the map'}</p>
+      <ol>${ids.slice(0, 12).map(paperBtn).join('')}</ol>`);
+    if (ids.length) Graph.zoomToFit(900, 60, n => lit.has(n.id));
+  }
+  // the picked day stays marked in the strip until the selection changes
+  const markDay = day => document.querySelectorAll('[data-nv-day]').forEach(b => {
+    const on = b.dataset.nvDay === day;
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', on);
+  });
+  function clear() { sel = null; lit = null; card.hidden = true; repaint(); markDay(null); }
   card.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
@@ -246,12 +266,19 @@ MAP_JS = r"""
   };
   find.addEventListener('change', go);
   find.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
-  // topic chips in the stats panel above fly the map to that topic
-  document.addEventListener('click', e => {
+  // topic chips under the map fly to that topic; a day in the strip under the map lights that day's papers
+  const pick = e => {
+    const d = e.target.closest('[data-nv-day]');
+    if (d) { e.preventDefault(); openDay(d.dataset.nvDay, d.dataset.nvLabel); return; }
     const b = e.target.closest('[data-nv-topic]');
     if (!b) return;
     openTopic(+b.dataset.nvTopic);
     root.scrollIntoView({behavior: 'smooth', block: 'center'});
+  };
+  document.addEventListener('click', pick);
+  document.addEventListener('keydown', e => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest && e.target.closest('[data-nv-day]')) pick(e);
+    else if (e.key === 'Escape' && !card.hidden) clear();
   });
 
   // topic names float over their hubs as HTML, so they stay crisp and clickable
@@ -455,42 +482,42 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-about code { font-size:.9em; background:color-mix(in srgb, var(--rule) 45%, transparent); padding:0 4px;
   border-radius:3px; white-space:normal; word-break:break-word; }
 
-/* landing: the research map, collection stats, and new papers per day in the right-hand pane */
-.nv-landing { gap:16px !important; }
+/* landing: before the first question the desk is two panes, the question and the map; the steps pane, the
+   list filters and "start over" only appear once there is an answer to work on */
+.nv-desk:not(.nv-asked) :is(.nv-steps, .nv-refine, .nv-reset) { display:none !important; }
+.nv-desk.nv-asked .nv-idle { display:none !important; }
+.nv-idle-note { font-size:15px; line-height:1.55; color:var(--graphite); margin:4px 0 8px; max-width:38ch; }
+.nv-landing { gap:0 !important; }
 .nv-landing.nv-off { display:none !important; }
-.nv-tiles { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:1px;
-  background:var(--rule); border:1px solid var(--rule); border-radius:4px; overflow:hidden; margin:4px 0 0; }
-.nv-tiles.two { grid-template-columns:repeat(2, minmax(0, 1fr)); margin:0 0 10px; }
-.nv-trend { padding-bottom:18px; margin-bottom:14px; border-bottom:1px solid var(--rule); }
-.nv-trend .nv-tile .v { font-size:21px; }
-.nv-trend .nv-bar .tip { white-space:normal; width:max-content; max-width:200px; }
-.nv-tile { background:var(--paper); padding:12px 14px; }
-.nv-tile .k { font-size:13px; color:var(--graphite); margin:0; }
-.nv-tile .v { font-family:var(--serif); font-size:27px; line-height:1.2; font-weight:500; color:var(--ink);
-  margin:2px 0 0; font-variant-numeric:tabular-nums; }
-.nv-tile .sub { font-size:13px; color:var(--graphite); margin:2px 0 0; }
 .nv-land-h { font-family:var(--serif); font-weight:500; font-size:21px; color:var(--ink); margin:0; }
 .nv-land-note { font-size:13px; color:var(--graphite); margin:2px 0 12px; max-width:68ch; }
-.nv-chart { position:relative; padding:0 0 0 2.6rem; }
-.nv-chart .grid { position:absolute; left:2.6rem; right:0; border-top:1px dashed var(--rule); }
-.nv-chart .ylab { position:absolute; left:0; width:2.2rem; text-align:right; font-size:12px; color:var(--graphite);
-  transform:translateY(-50%); font-variant-numeric:tabular-nums; }
-.nv-bars { position:relative; display:flex; align-items:flex-end; gap:2px; height:150px;
+.nv-map-intro { margin-top:24px; }
+
+/* the strip under the map: papers per day, coloured on the map's own recency ramp, so it reads as its legend */
+.nv-trend { margin-top:10px; }
+.nv-chart { position:relative; }
+.nv-bars { position:relative; display:flex; align-items:flex-end; gap:3px; height:56px;
   border-bottom:1px solid var(--graphite); }
-.nv-bar { position:relative; flex:1 1 0; height:100%; display:flex; align-items:flex-end; outline:none; }
-.nv-bar i { display:block; width:100%; background:var(--kept); border-radius:4px 4px 0 0; min-height:0; }
-.nv-bar.today i { background:color-mix(in srgb, var(--kept) 45%, transparent); }
-.nv-bar:hover i, .nv-bar:focus-visible i { filter:brightness(1.15); }
+.nv-bar { position:relative; flex:1 1 0; height:100%; display:flex; align-items:flex-end; outline:none;
+  cursor:pointer; }
+.nv-bar i { display:block; width:100%; border-radius:2px 2px 0 0; min-height:0;
+  background:color-mix(in srgb, var(--kept) var(--tone, 100%), var(--map-old)); }
+.nv-bar.today i { opacity:.55; }
+.nv-bar.on i { outline:2px solid var(--ink); outline-offset:1px; }
+.nv-bar:hover i { outline:1.5px solid var(--ink); outline-offset:1px; }
+.nv-bar:focus-visible { outline:2px solid var(--kept); outline-offset:2px; border-radius:2px; }
 .nv-bar .tip { display:none; position:absolute; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%);
-  z-index:3; white-space:nowrap; padding:6px 9px; border-radius:4px; font-size:13px; line-height:1.4;
-  background:var(--ink); color:var(--paper); pointer-events:none; }
+  z-index:3; width:max-content; max-width:220px; padding:6px 9px; border-radius:4px; font-size:13px;
+  line-height:1.4; background:var(--ink); color:var(--paper); pointer-events:none; }
 .nv-bar:first-child .tip, .nv-bar:nth-child(2) .tip, .nv-bar:nth-child(3) .tip { left:0; transform:none; }
 .nv-bar:nth-last-child(-n+3) .tip { left:auto; right:0; transform:none; }
 .nv-bar:hover .tip, .nv-bar:focus-visible .tip { display:block; }
-.nv-xlabs { position:relative; height:18px; margin-top:4px; font-size:12px; color:var(--graphite); }
-.nv-xlabs span { position:absolute; transform:translateX(-50%); white-space:nowrap; }
-.nv-xlabs span:last-child { transform:translateX(-100%); }
-.nv-chart-table { margin-top:8px; font-size:13px; color:var(--graphite); }
+.nv-xlabs { display:flex; justify-content:space-between; gap:12px; margin-top:4px; font-size:12px;
+  color:var(--graphite); }
+.nv-xlabs .mid { text-align:center; }
+.nv-trend-line { font-family:var(--serif); font-size:17px; line-height:1.55; color:var(--ink);
+  margin:12px 0 2px; max-width:68ch; }
+.nv-chart-table { margin-top:4px; font-size:13px; color:var(--graphite); }
 .nv-chart-table summary { cursor:pointer; }
 .nv-chart-table table { border-collapse:collapse; margin-top:6px; font-variant-numeric:tabular-nums; }
 .nv-chart-table td, .nv-chart-table th { padding:2px 14px 2px 0; text-align:left; }
@@ -500,7 +527,7 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-topics button:hover { border-color:var(--kept); }
 .nv-topics button span { color:var(--graphite); margin-left:6px; font-variant-numeric:tabular-nums; }
 
-.nv-map { position:relative; height:560px; border:1px solid var(--rule); border-radius:4px; overflow:hidden;
+.nv-map { position:relative; height:clamp(480px, 68vh, 760px); border:1px solid var(--rule); border-radius:4px; overflow:hidden;
   background:var(--paper); }
 .nv-map-canvas { position:absolute; inset:0; }
 .nv-map-labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
@@ -528,15 +555,13 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-map-card[hidden] { display:none; }
 .nv-map-x { position:absolute; top:6px; right:8px; border:none; background:none; font-size:20px; line-height:1;
   color:var(--graphite); cursor:pointer; padding:4px; }
-.nv-map-kicker { display:block; font-size:12px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
-  color:var(--kept); margin:0 24px 4px 0; padding:0; border:none; background:none; text-align:left; cursor:pointer; }
+.nv-map-kicker { display:block; font-size:13px; font-weight:600; color:var(--kept); margin:0 24px 4px 0; padding:0; border:none; background:none; text-align:left; cursor:pointer; }
 p.nv-map-kicker { cursor:default; }
 .nv-map-title { display:block; font-family:var(--serif); font-size:19px; line-height:1.3; font-weight:500;
   color:var(--ink); margin:0 20px 0 0; text-decoration:none; text-align:left; padding:0 !important; }
 a.nv-map-title:hover { text-decoration:underline; text-decoration-color:var(--kept); }
 .nv-map-meta { font-size:13px; color:var(--graphite); margin:4px 0 0; }
-.nv-map-sub { font-size:12px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--graphite);
-  margin:14px 0 4px; }
+.nv-map-sub { font-size:13px; font-weight:600; color:var(--graphite); margin:14px 0 4px; }
 .nv-map-card ol { list-style:none; padding:0; margin:6px 0 0; }
 .nv-map-card li { padding:7px 0; border-top:1px solid var(--rule); }
 .nv-map-card li button { display:block; text-align:left; border:none; background:none; padding:0; cursor:pointer;
@@ -550,8 +575,7 @@ a.nv-map-title:hover { text-decoration:underline; text-decoration-color:var(--ke
   .nv-map { height:440px; }
   .nv-map-hint { display:none; }
   .nv-map-card { top:auto; height:55%; }
-  .nv-tiles { grid-template-columns:repeat(2, minmax(0, 1fr)); }
-  .nv-tile .v { font-size:21px; }
+  .nv-xlabs .mid { display:none; }
   .nv-about table, .nv-about tbody, .nv-about tr, .nv-about td { display:block; width:auto !important; }
   .nv-about thead { display:none; }
   .nv-about tr { padding:12px 0; border-bottom:1px solid var(--rule) !important; }
@@ -638,11 +662,6 @@ def masthead_html(store: CorpusStore) -> str:
 
 
 # ---------------------------------------------------------------- landing: stats, papers per day, topics
-def _tile(label: str, value: str, sub: str = "") -> str:
-    sub = f'<p class="sub">{sub}</p>' if sub else ""
-    return f'<div class="nv-tile"><p class="k">{label}</p><p class="v">{value}</p>{sub}</div>'
-
-
 def _week_change(week: int, prev: int) -> str:
     if not prev:
         return "the first week collected" if week else ""
@@ -657,29 +676,28 @@ def papers_chart(days: list[tuple[date, int, int]]) -> str:
     """Papers per publication day as HTML bars (they keep real text sizes at any width), with a table view."""
     if not days:
         return ""
-    peak = max(p for _, p, _ in days)
-    top = max(10, math.ceil(peak / 10) * 10) if peak <= 100 else math.ceil(peak / 50) * 50
+    top = max(1, max(p for _, p, _ in days))
     today = days[-1][0]
-    bars = []
-    for d, papers, posts in days:
-        posts_line = f", {_plural(posts, 'blog post')}" if posts else ""
-        tip = f"{d.strftime('%a %-d %b')}: {_plural(papers, 'paper')}{posts_line}" + \
-              (" (so far today)" if d == today else "")
-        bars.append(f'<span class="nv-bar{" today" if d == today else ""}" tabindex="0" aria-label="{tip}">'
-                    f'<i style="height:{100 * papers / top:.1f}%"></i><span class="tip">{tip}</span></span>')
     n = len(days)
-    ticks = [i for i in range(n - 1, -1, -7)][::-1]
-    xlabs = "".join(f'<span style="left:{(i + 0.5) / n * 100:.2f}%">{days[i][0].strftime("%-d %b")}</span>'
-                    for i in ticks)
-    grid = "".join(f'<span class="grid" style="top:{100 - f * 100:.0f}%"></span>'
-                   f'<span class="ylab" style="top:{(1 - f) * 150:.0f}px">{round(top * f):,}</span>'
-                   for f in (1, 0.5))
+    bars = []
+    for i, (d, papers, posts) in enumerate(days):
+        posts_line = f", {_plural(posts, 'blog post')}" if posts else ""
+        label = d.strftime('%a %-d %b')
+        tip = f"{label}: {_plural(papers, 'paper')}{posts_line}" + (" (so far today)" if d == today else "")
+        # the same paper-to-teal ramp as the map's points, so the strip doubles as the map's legend
+        tone = round(100 * (i / (n - 1)) ** 1.5) if n > 1 else 100
+        bars.append(f'<span class="nv-bar{" today" if d == today else ""}" role="button" tabindex="0" '
+                    f'data-nv-day="{d.isoformat()}" data-nv-label="{label}" aria-label="{tip}. Show on the map">'
+                    f'<i style="height:{max(4, 100 * papers / top) if papers else 0:.1f}%;--tone:{tone}%"></i>'
+                    f'<span class="tip">{tip}</span></span>')
+    xlabs = (f'<span>{days[0][0].strftime("%-d %b")}</span><span class="mid">older papers paler, '
+             f'newer a stronger teal</span><span>{today.strftime("%-d %b")}</span>')
     total = sum(p for _, p, _ in days)
     best = max(days, key=lambda x: x[1])
     rows_ = "".join(f"<tr><td>{d.strftime('%a %-d %b')}</td><td>{p:,}</td><td>{b:,}</td></tr>"
                     for d, p, b in reversed(days))
     return (f'<div class="nv-chart" role="group" aria-label="{total:,} papers over the last {n} days, '
-            f'busiest on {best[0].strftime("%-d %b")} with {best[1]:,}">{grid}'
+            f'busiest on {best[0].strftime("%-d %b")} with {best[1]:,}">'
             f'<div class="nv-bars">{"".join(bars)}</div><div class="nv-xlabs">{xlabs}</div></div>'
             f'<details class="nv-chart-table"><summary>Show as a table</summary><table><thead><tr><th>Day</th>'
             f'<th>Papers</th><th>Blog posts</th></tr></thead><tbody>{rows_}</tbody></table></details>')
@@ -691,36 +709,38 @@ def map_intro_html(topics: list[dict]) -> str:
     chips = "".join(f'<li><button type="button" data-nv-topic="{g}">{html.escape(t["label"])}'
                     f'<span>{t["size"]:,}</span></button></li>' for g, t in biggest)
     pick = f' Pick a topic to fly there:</p><ul class="nv-topics">{chips}</ul>' if chips else "</p>"
-    return (f'<section><h2 class="nv-land-h">Map of the papers</h2><p class="nv-land-note">Every paper is a point, '
-            f'placed by what it is about. Papers on the same subject cluster around a topic, named by its most '
-            f'typical title words, and each paper is linked to the papers closest to it in meaning. Newer papers '
-            f'are a stronger teal.{pick}</section>')
+    return (f'<section class="nv-map-intro"><h2 class="nv-land-h">Map of the papers</h2><p class="nv-land-note">'
+            f'Every paper is a point, placed by what it is about. Papers on the same subject cluster around a '
+            f'topic, named by its most typical title words.{pick}</section>')
 
 
 def landing_html(stats: dict) -> str:
-    """The collection's numbers, under the research map on the Ask tab before a question."""
+    """What the landing says while the collection is empty; once it has items, the map and strip speak."""
     if not stats["total"]:
-        return ('<p class="nv-hint">The collection is being gathered. Its numbers and the map of its papers '
-                'appear here once it is ready.</p>')
-    tiles = "".join([
-        _tile("In the collection", f"{stats['total']:,}"),
-        _tile("Papers", f"{stats['papers']:,}"),
-        _tile("Blog posts and news", f"{stats['posts']:,}"),
-        _tile("Sources", f"{stats['sources']:,}"),
-    ])
-    return f'<div class="nv-tiles">{tiles}</div>'
+        return ('<p class="nv-hint">The collection is being gathered. The map of its papers and the new '
+                'papers per day appear here once it is ready.</p>')
+    return ""
 
 
 def trend_html(stats: dict) -> str:
-    """New papers this week against last week, and per day, for the top of the right-hand pane."""
+    """The papers-per-day strip under the map, and one sentence on how this week compares with the last."""
     if not stats["total"]:
         return ""
     days = stats["days"]
-    tiles = (_tile("Last 7 days", f"{stats['week']:,}", _week_change(stats["week"], stats["prev_week"]))
-             + _tile("The 7 days before", f"{stats['prev_week']:,}"))
-    return (f'<section class="nv-trend"><p class="nv-pane-h">New papers, last {len(days)} days</p>'
-            f'<div class="nv-tiles two">{tiles}</div><p class="nv-land-note">Per day, by publication date. arXiv '
-            f'announces nothing at weekends, so those bars stay low.</p>{papers_chart(days)}</section>')
+    week, prev = stats["week"], stats["prev_week"]
+    change = _week_change(week, prev)
+    line = f"{_plural(week, 'new paper')} in the last 7 days" + (f", {change}" if change else "") + "."
+    best = max(days, key=lambda x: x[1])
+    if not best[1]:  # nothing in the window: say so plainly instead of drawing an empty strip
+        newest = stats.get("newest")
+        since = f" The newest is from {newest.strftime('%A %-d %B')}." if newest else ""
+        return (f'<section class="nv-trend" aria-label="New papers per day, last {len(days)} days">'
+                f'<p class="nv-trend-line">No new papers in the last {len(days)} days.{since}</p>'
+                f'<p class="nv-land-note">The Sources tab shows when the collection was last updated.</p></section>')
+    line += f" Busiest day: {best[0].strftime('%A %-d %B')}, with {_plural(best[1], 'paper')}."
+    return (f'<section class="nv-trend" aria-label="New papers per day, last {len(days)} days">'
+            f'{papers_chart(days)}<p class="nv-trend-line">{line}</p><p class="nv-land-note">By publication '
+            f'date; arXiv announces nothing at weekends. Pick a day to see its papers on the map.</p></section>')
 
 
 # ---------------------------------------------------------------- result rows
@@ -1097,6 +1117,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         msg = gr.Textbox(placeholder=ASK_PLACEHOLDER, show_label=False, lines=3, max_lines=8,
                                          elem_classes="nv-ask", autofocus=True)
                         ask = gr.Button("Ask", variant="primary")
+                        gr.HTML(f'<p class="nv-idle-note">{ASK_EMPTY}</p>', elem_classes=["nv-flush", "nv-idle"])
                         gr.Examples(EXAMPLES, inputs=msg, label="Or try one of these")
                         with gr.Column(elem_classes="nv-refine"):
                             gr.HTML('<p class="nv-pane-h">Refine the list</p>', elem_classes="nv-flush")
@@ -1108,7 +1129,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         start_over = gr.Button("Start a new conversation", size="sm", variant="secondary",
                                                elem_classes="nv-reset")
                     with gr.Column(scale=3, min_width=380, elem_classes="nv-center"):
-                        answer = gr.Markdown(f"<p class='nv-hint'>{ASK_EMPTY}</p>", elem_classes="nv-answer")
+                        answer = gr.Markdown("", elem_classes="nv-answer")
                         refs = gr.HTML(elem_classes="nv-flush")
                         more = gr.Button("Show more references", size="sm", variant="secondary", visible=False,
                                          elem_classes="nv-more")
@@ -1116,10 +1137,11 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         with gr.Column(elem_classes="nv-landing"):
                             gr.HTML(MAP_HTML, head=MAP_HEAD, js_on_load=MAP_JS, server_functions=[map_data],
                                     elem_classes="nv-flush")
+                            stats = gr.HTML(elem_classes="nv-flush")  # only says something while empty
+                            trend = gr.HTML(elem_classes="nv-flush")  # papers-per-day strip: the map's legend
                             map_intro = gr.HTML(elem_classes="nv-flush")
-                            stats = gr.HTML(elem_classes="nv-flush")
+                    # hidden until the first question (see .nv-asked in CSS)
                     with gr.Column(scale=1, min_width=260, elem_classes="nv-steps"):
-                        trend = gr.HTML(elem_classes="nv-flush")  # stays while an answer is shown
                         gr.HTML('<p class="nv-pane-h">What the assistant did</p>', elem_classes="nv-flush")
                         sieve = gr.HTML(STEPS_EMPTY, elem_classes="nv-flush")
                 conv = gr.State([])
@@ -1142,7 +1164,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                     comp.change(refine, view, [refs, shown, more], api_visibility="private")
                 more.click(refine_more, view + [shown], [refs, shown, more], api_visibility="private")
                 start_over.click(None, js=LANDING_JS.format(op="remove"), api_visibility="private")
-                start_over.click(lambda: (f"<p class='nv-hint'>{ASK_EMPTY}</p>", "", STEPS_EMPTY, "", [], {},
+                start_over.click(lambda: ("", "", STEPS_EMPTY, "", [], {},
                                           REF_PAGE, gr.update(visible=False)), None,
                                  ask_outputs + [more], api_visibility="private")
 

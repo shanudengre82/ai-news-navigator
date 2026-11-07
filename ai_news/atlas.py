@@ -177,10 +177,13 @@ def collection_stats(store: CorpusStore, days: int = 14, today: date | None = No
     first = today - timedelta(days=days - 1)
     per_day = {first + timedelta(days=i): [0, 0] for i in range(days)}
     week = prev = 0
+    newest = None
     for it in items:
         d = _day(it)
         if d is None:
             continue
+        if it.source_type == "paper" and d <= today and (newest is None or d > newest):
+            newest = d
         if d in per_day:
             per_day[d][0 if it.source_type == "paper" else 1] += 1
         if it.source_type != "paper":
@@ -193,5 +196,5 @@ def collection_stats(store: CorpusStore, days: int = 14, today: date | None = No
     papers = sum(it.source_type == "paper" for it in items)
     return {"total": len(items), "papers": papers, "posts": len(items) - papers,
             "sources": len({it.source for it in items}), "week": week, "prev_week": prev,
-            "last_refresh": store.meta.get("last_refresh"),
+            "last_refresh": store.meta.get("last_refresh"), "newest": newest,
             "days": [(d, p, b) for d, (p, b) in sorted(per_day.items())]}
