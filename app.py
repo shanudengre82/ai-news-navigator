@@ -23,7 +23,7 @@ from ai_news import scheduler  # noqa: E402
 from ai_news.assistant import message_text, render, run_events  # noqa: E402
 from ai_news.post import keep_links  # noqa: E402
 from ai_news.rag.prompts import POLISH  # noqa: E402
-from ai_news.ui import CSS, FIT_JS, FONTS_HEAD, REF_PAGE, STEPS_EMPTY, build_ui, theme  # noqa: E402
+from ai_news.ui import CSS, FIT_JS, FONTS_HEAD, REF_PAGE, STEPS_EMPTY, THEME_JS, build_ui, theme  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -122,6 +122,8 @@ if settings.refresh_hours > 0:
 log.info("refresh mode: %s, every %s h", settings.refresh_mode, settings.refresh_hours)
 
 if __name__ == "__main__":
-    head = f"{FONTS_HEAD}<script>{FIT_JS}</script>"  # FIT_JS: lets the page scroll inside the Spaces iframe
+    # THEME_JS first: applies the saved colour theme before the page paints. FIT_JS: lets the page scroll
+    # inside the Spaces iframe.
+    head = f"<script>{THEME_JS}</script>{FONTS_HEAD}<script>{FIT_JS}</script>"
     demo.queue(default_concurrency_limit=2).launch(theme=theme(), css=CSS, head=head, mcp_server=True,
                                                    show_error=True)

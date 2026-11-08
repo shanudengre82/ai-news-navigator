@@ -27,6 +27,7 @@ NEIGHBOURS = 4
 # their cosine range (bge-small scores unrelated abstracts ~0.7), so the cut is measured on the corpus itself.
 NEAR_PERCENTILE = 95
 SPREAD = 300.0  # the PCA start fills roughly ±SPREAD in each axis
+FIELDS = 8  # topics are grouped into at most this many fields, one categorical colour each
 
 _cache: dict[int, tuple[int, dict]] = {}
 _cache_lock = threading.Lock()
@@ -58,6 +59,23 @@ def _cluster(x: np.ndarray, k: int) -> np.ndarray:
     km = faiss.Kmeans(x.shape[1], k, niter=20, seed=0, spherical=True, min_points_per_centroid=1)
     km.train(x)
     return km.index.search(x, 1)[1][:, 0].astype(int)
+
+
+def _fields(x: np.ndarray, groups: np.ndarray, n_topics: int) -> dict[int, int]:
+    """Group related topics into at most FIELDS broad fields (k-means over the topics' mean vectors), and number
+    the fields 0.. by size, largest first: that number is the colour slot shared by the field's topics, so
+    a topic has the same colour on the map, the chips and the tags, and every paper gets a colour."""
+    present = [g for g in range(n_topics) if (groups == g).any()]
+    if not present:
+        return {}
+    centres = np.stack([x[groups == g].mean(axis=0) for g in present]).astype("float32")
+    centres /= np.maximum(np.linalg.norm(centres, axis=1, keepdims=True), 1e-12)
+    field = _cluster(centres, min(FIELDS, len(present)))
+    sizes = Counter()
+    for g, f in zip(present, field):
+        sizes[int(f)] += int((groups == g).sum())
+    rank = {f: r for r, (f, _) in enumerate(sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])))}
+    return {g: rank[int(f)] for g, f in zip(present, field)}
 
 
 def _terms(title: str) -> set[str]:
@@ -141,7 +159,10 @@ def build_map(items: list[NewsItem], vectors: np.ndarray, k: int = NEIGHBOURS,
     for g in range(n_topics):
         members = np.flatnonzero(groups == g)
         centre = pos[members].mean(axis=0) if len(members) else np.zeros(3)
-        topics.append({"label": labels[g], "size": int(len(members)), "pos": [int(c) for c in np.rint(centre)]})
+        topics.append({"label": labels[g], "size": int(len(members)), "pos": [int(c) for c in np.rint(centre)],
+                       "slot": None})
+    for g, slot in _fields(x, groups, n_topics).items():
+        topics[g]["slot"] = slot
     papers = []
     for i, it in enumerate(items):
         title = it.title if len(it.title) <= 140 else it.title[:139].rsplit(" ", 1)[0] + "…"
@@ -168,6 +189,25 @@ def research_map(store: CorpusStore, max_nodes: int = MAX_NODES) -> dict:
     with _cache_lock:
         _cache[key] = (version, data)
     return data
+
+
+_topic_cache: dict[int, tuple[int, dict]] = {}
+
+
+def topic_of(store: CorpusStore) -> dict[str, tuple[str, int | None]]:
+    """url -> (topic label, colour slot) for every paper on the map, to tag items with their topic."""
+    data = research_map(store)
+    key, version = id(store), data.get("version")
+    with _cache_lock:
+        hit = _topic_cache.get(key)
+        if hit and hit[0] == version:
+            return hit[1]
+    topics = data.get("topics", [])
+    out = {p["u"]: (topics[p["g"]]["label"], topics[p["g"]].get("slot")) for p in data.get("papers", [])
+           if 0 <= p["g"] < len(topics)}
+    with _cache_lock:
+        _topic_cache[key] = (version, out)
+    return out
 
 
 def collection_stats(store: CorpusStore, days: int = 14, today: date | None = None) -> dict:

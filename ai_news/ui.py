@@ -17,7 +17,7 @@ from typing import Callable
 
 import gradio as gr
 
-from ai_news.atlas import collection_stats, research_map
+from ai_news.atlas import collection_stats, research_map, topic_of
 from ai_news.fetchers.common import parse_iso
 from ai_news.history import add_entry, find, history_html, make_entry, restore
 from ai_news.post import (DEFAULT_PICKS, LINKEDIN_LIMIT, OTHER, TOPICS, WEEK_DAYS, category_count, draft_post,
@@ -159,16 +159,21 @@ MAP_JS = r"""
   const readPalette = () => {
     const css = n => getComputedStyle(root).getPropertyValue(n).trim();
     pal = {bg: css('--paper') || '#F5F7F9', ink: css('--ink') || '#1B2440', old: css('--map-old') || '#A9C9C3',
-           fresh: css('--kept') || '#0F7B6C', link: css('--map-link') || '#C9D4DD', dim: css('--map-dim') || '#DDE3EA'};
+           fresh: css('--kept') || '#0F7B6C', link: css('--map-link') || '#C9D4DD', dim: css('--map-dim') || '#DDE3EA',
+           topics: [1, 2, 3, 4, 5, 6, 7, 8].map(k => css('--topic-' + k) || '#2a78d6'),
+           other: css('--topic-other') || '#9AA3B2'};
   };
   readPalette();
   const age = p => Math.min(1, Math.max(0, ((Date.parse(p.d) || d0) - d0) / (d1 - d0)));
   let sel = null, lit = null;  // the selected node and the set of highlighted node ids
+  // colour is the field (related topics grouped, one hue each); recency is paleness
+  const topicColor = g => { const s = T[g] ? T[g].slot : null; return s == null ? pal.other : pal.topics[s]; };
+  const topicVar = g => { const s = T[g] ? T[g].slot : null; return s == null ? 'var(--topic-other)' : `var(--topic-${s + 1})`; };
   const nodeColor = n => {
     if (lit && !lit.has(n.id)) return pal.dim;
-    if (n.hub) return pal.ink;
+    if (n.hub) return topicColor(n.g);
     if (sel === n) return pal.ink;
-    return mix(pal.old, pal.fresh, Math.pow(age(n), 1.5));
+    return mix(pal.bg, topicColor(n.g), 0.55 + 0.45 * Math.pow(age(n), 1.2));
   };
   const nodeVal = n => (lit && !lit.has(n.id) ? 0.35 : 1) *
     (n.hub ? 10 + Math.sqrt(n.size) * 2 : 1 + Math.log1p(n.v || 0) * 1.6);
@@ -230,7 +235,7 @@ MAP_JS = r"""
     sel = p; lit = new Set([p.id, 't' + p.g, ...near[i].map(x => x[0])]);
     repaint(); markDay(null);
     const nb = near[i].slice(0, 8);
-    show(`<button type="button" class="nv-map-kicker" data-g="${p.g}">${esc(T[p.g] ? T[p.g].label : '')}</button>
+    show(`<button type="button" class="nv-map-kicker nv-dot" style="--c:${topicVar(p.g)}" data-g="${p.g}">${esc(T[p.g] ? T[p.g].label : '')}</button>
       <a class="nv-map-title" href="${esc(p.u)}" target="_blank" rel="noopener">${esc(p.t)}</a>
       <p class="nv-map-meta">${meta(p)}</p>
       <p class="nv-map-sub">${nb.length ? 'Nearby papers' : 'No paper sits close to this one'}</p>
@@ -242,7 +247,7 @@ MAP_JS = r"""
     const h = hubs[g];
     sel = h; lit = new Set([h.id, ...members[g]]);
     repaint(); markDay(null);
-    show(`<p class="nv-map-kicker">Topic</p><p class="nv-map-title">${esc(T[g].label)}</p>
+    show(`<p class="nv-map-kicker nv-dot" style="--c:${topicVar(g)}">Topic</p><p class="nv-map-title">${esc(T[g].label)}</p>
       <p class="nv-map-meta">${T[g].size} papers, most upvoted and newest first</p>
       <ol>${members[g].slice(0, 10).map(paperBtn).join('')}</ol>`);
     fly(h);
@@ -300,7 +305,8 @@ MAP_JS = r"""
   const rank = T.map((t, g) => g).sort((a, b) => T[b].size - T[a].size);
   const labelEls = T.map((t, g) => {
     const el = document.createElement('button');
-    el.type = 'button'; el.className = 'nv-map-label'; el.textContent = t.label; el.tabIndex = -1;
+    el.type = 'button'; el.className = 'nv-map-label nv-dot'; el.textContent = t.label; el.tabIndex = -1;
+    el.style.setProperty('--c', topicVar(g));
     el.addEventListener('click', () => openTopic(g));
     labelsEl.appendChild(el);
     return el;
@@ -331,23 +337,146 @@ MAP_JS = r"""
     running = e.isIntersecting;
     running ? Graph.resumeAnimation() : Graph.pauseAnimation();
   }).observe(root);
-  new MutationObserver(() => { readPalette(); Graph.backgroundColor(pal.bg); repaint(); })
-    .observe(document.body, {attributes: true, attributeFilter: ['class']});
+  const recolour = () => { readPalette(); Graph.backgroundColor(pal.bg); repaint(); };
+  new MutationObserver(recolour).observe(document.body, {attributes: true, attributeFilter: ['class']});
+  new MutationObserver(recolour).observe(document.documentElement,
+                                         {attributes: true, attributeFilter: ['class', 'data-nv-theme']});
 })();
 """
+
+# ---------------------------------------------------------------- colour: topics and themes
+# The map's fields (groups of related topics, largest first) get these categorical hues in this fixed order,
+# validated for colour-vision deficiency and contrast on every theme's surface with the dataviz palette script.
+TOPIC_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+TOPIC_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
+THEMES = [("ink", "Ink"), ("mono", "Black and white"), ("sunset", "Sunset"), ("ocean", "Ocean")]
+
+# Each theme, light then dark. Keys are the app's tokens; theme_css() also maps them onto Gradio's variables.
+_THEME_TOKENS = {
+    "mono": (
+        dict(paper="#FFFFFF", ink="#000000", graphite="#555555", rule="#D6D6D6", field="#FFFFFF", kept="#000000",
+             on_kept="#FFFFFF", soft="#EBEBEB", dropped="#808080", map_old="#CFCFCF", map_link="#DADADA",
+             map_dim="#EEEEEE", input="#BDBDBD", fill2="#F2F2F2",
+             topics=["#111111", "#555555", "#333333", "#777777", "#222222", "#666666", "#444444", "#888888"],
+             other="#B0B0B0"),
+        dict(paper="#000000", ink="#FFFFFF", graphite="#AAAAAA", rule="#333333", field="#111111", kept="#FFFFFF",
+             on_kept="#000000", soft="#262626", dropped="#8C8C8C", map_old="#3A3A3A", map_link="#2A2A2A",
+             map_dim="#1A1A1A", input="#444444", fill2="#141414",
+             topics=["#EEEEEE", "#999999", "#CCCCCC", "#777777", "#DDDDDD", "#888888", "#BBBBBB", "#666666"],
+             other="#4D4D4D")),
+    "sunset": (
+        dict(paper="#FFF8E7", ink="#3B2410", graphite="#7A5A3A", rule="#F0DDB8", field="#FFFDF6", kept="#C2410C",
+             on_kept="#FFFFFF", soft="#FDE6CC", dropped="#64748B", map_old="#F7D774", map_link="#EBD9B5",
+             map_dim="#F5EBD6", input="#E5C995", fill2="#FCEFD2"),
+        dict(paper="#1F150B", ink="#FBEBD3", graphite="#C9A98A", rule="#4A3520", field="#2A1D10", kept="#FB923C",
+             on_kept="#1F150B", soft="#4A2A12", dropped="#94A3B8", map_old="#8A6A1C", map_link="#4A3620",
+             map_dim="#2E2216", input="#5C4329", fill2="#2A1D10")),
+    "ocean": (
+        dict(paper="#F2F7FB", ink="#0B2545", graphite="#4A6283", rule="#CFE0EE", field="#FFFFFF", kept="#1D6FB8",
+             on_kept="#FFFFFF", soft="#D6E8F7", dropped="#B7791F", map_old="#A9CBE8", map_link="#C6D8E8",
+             map_dim="#E1EBF4", input="#B9CFE3", fill2="#E6EFF7"),
+        dict(paper="#0B1726", ink="#E3EEF9", graphite="#93AECB", rule="#1F3550", field="#10203A", kept="#5AA9E6",
+             on_kept="#0B1726", soft="#163A5C", dropped="#E0A84A", map_old="#1F4466", map_link="#1E3350",
+             map_dim="#142438", input="#2A4766", fill2="#10203A")),
+}
+
+
+def _token_block(t: dict) -> str:
+    v = {"--paper": t["paper"], "--ink": t["ink"], "--graphite": t["graphite"], "--rule": t["rule"],
+         "--field": t["field"], "--kept": t["kept"], "--on-kept": t["on_kept"], "--dropped": t["dropped"],
+         "--map-old": t["map_old"], "--map-link": t["map_link"], "--map-dim": t["map_dim"],
+         # Gradio's own variables, so inputs, buttons, tabs and labels follow the theme too
+         "--body-background-fill": t["paper"], "--background-fill-primary": t["paper"],
+         "--block-background-fill": t["paper"], "--panel-background-fill": t["paper"],
+         "--background-fill-secondary": t["fill2"], "--input-background-fill": t["field"],
+         "--body-text-color": t["ink"], "--link-text-color": t["ink"], "--block-title-text-color": t["ink"],
+         "--body-text-color-subdued": t["graphite"], "--block-label-text-color": t["graphite"],
+         "--block-info-text-color": t["graphite"], "--border-color-primary": t["rule"],
+         "--input-border-color": t["input"], "--button-secondary-border-color": t["input"],
+         "--input-border-color-focus": t["kept"], "--color-accent": t["kept"],
+         "--button-primary-background-fill": t["kept"], "--button-primary-background-fill-hover": t["kept"],
+         "--button-primary-text-color": t["on_kept"], "--color-accent-soft": t["soft"],
+         "--checkbox-label-background-fill-selected": t["soft"]}
+    if "topics" in t:
+        v.update({f"--topic-{i + 1}": c for i, c in enumerate(t["topics"])})
+        v["--topic-other"] = t["other"]
+    return "; ".join(f"{k}:{val}" for k, val in v.items())
+
+
+def theme_css() -> str:
+    """Light and dark blocks per theme on html[data-nv-theme]: more specific than Gradio's :root / .dark."""
+    out = []
+    for name, (light, dark) in _THEME_TOKENS.items():
+        sel = f'html[data-nv-theme="{name}"]'
+        # Gradio also copies every `.dark` rule as `.dark .gradio-container.gradio-container-x .contain` (four
+        # classes), so each block also targets .contain, one notch more specific than that copy.
+        out.append(f"{sel}, {sel} .gradio-container .contain {{ {_token_block(light)}; }}")
+        out.append(f"{sel}.dark, {sel} .dark, {sel} .dark .gradio-container .contain, "
+                   f"{sel}.dark .gradio-container .contain {{ {_token_block(dark)}; }}")
+    return "\n".join(out)
+
+
+def _topic_vars(colours: list[str], other: str) -> str:
+    return "; ".join([f"--topic-{i + 1}:{c}" for i, c in enumerate(colours)] + [f"--topic-other:{other}"])
+
+
+# The theme menu: applied before first paint from localStorage (a per-browser preference), and on change.
+THEME_JS = """
+(() => {
+  if (window.__nvTheme) return; window.__nvTheme = true;
+  const KEY = 'nv-theme', root = document.documentElement;
+  let current = 'ink';
+  try { current = localStorage.getItem(KEY) || 'ink'; } catch (e) {}
+  const apply = v => {
+    current = v || 'ink';
+    if (current === 'ink') root.removeAttribute('data-nv-theme'); else root.setAttribute('data-nv-theme', current);
+    document.querySelectorAll('.nv-theme-pick').forEach(s => { s.value = current; });
+  };
+  apply(current);
+  document.addEventListener('change', e => {
+    const s = e.target.closest && e.target.closest('.nv-theme-pick');
+    if (!s) return;
+    apply(s.value);
+    try { localStorage.setItem(KEY, s.value); } catch (e) {}
+  });
+  // the masthead is re-rendered by the app: keep its menu showing the current theme
+  new MutationObserver(() => document.querySelectorAll('.nv-theme-pick').forEach(s => {
+    if (s.value !== current) s.value = current;
+  })).observe(document.documentElement, {childList: true, subtree: true});
+})();
+"""
+
+# Topic colour for HTML rendered on the server (references, result rows): set by build_ui from the map.
+_topic_lookup: Callable[[str], tuple[str, int | None] | None] = lambda url: None
+
+
+def topic_var(slot: int | None) -> str:
+    return f"var(--topic-{slot + 1})" if slot is not None else "var(--topic-other)"
+
+
+def _topic_tag(url: str) -> str:
+    hit = _topic_lookup(url)
+    if not hit:
+        return ""
+    label, slot = hit
+    return f'<span class="nv-topic" style="--c:{topic_var(slot)}" title="Topic on the map">{html.escape(label)}</span>'
+
 
 CSS = """
 :root {
   --paper:#F5F7F9; --ink:#1B2440; --graphite:#5B6478; --rule:#D7DCE5; --field:#FFFFFF;
   --kept:#0F7B6C; --dropped:#B7791F;
-  --map-old:#A9C9C3; --map-link:#C3CCD8; --map-dim:#DFE4EB;
+  --map-old:#A9C9C3; --map-link:#C3CCD8; --map-dim:#DFE4EB; --on-kept:#FFFFFF;
   --serif:"Newsreader", Georgia, "Times New Roman", serif;
+  %(topics_light)s;
 }
 .dark {
   --paper:#141B2D; --ink:#E6EAF2; --graphite:#9AA4B8; --rule:#2A3350; --field:#1B2338;
   --kept:#4FC7B4; --dropped:#E0A84A;
-  --map-old:#2E5559; --map-link:#33405F; --map-dim:#232C44;
+  --map-old:#2E5559; --map-link:#33405F; --map-dim:#232C44; --on-kept:#0E1A2B;
+  %(topics_dark)s;
 }
+%(themes)s
 .gradio-container { width:100% !important; max-width:1440px !important; margin:0 auto !important; }
 .gradio-container a { color:var(--ink); text-decoration-color:var(--rule); text-underline-offset:3px; }
 .gradio-container a:hover { text-decoration-color:var(--kept); }
@@ -375,9 +504,8 @@ CSS = """
 /* question box is the hero */
 .nv-ask textarea { font-family:var(--serif) !important; font-size:21px !important; line-height:1.4 !important;
   padding:14px 16px !important; }
-.nv-ask .submit-button { background:var(--kept) !important; color:#fff !important; font-weight:600;
+.nv-ask .submit-button { background:var(--kept) !important; color:var(--on-kept) !important; font-weight:600;
   border-radius:6px !important; padding:0 20px !important; margin-left:10px; min-height:44px; align-self:center; }
-.dark .nv-ask .submit-button { color:#0E1A2B !important; }
 .nv-ask .submit-button:hover { filter:brightness(.92); }
 .nv-filters { gap:12px !important; }
 .nv-hint { color:var(--graphite); font-size:15px; max-width:68ch; }
@@ -540,6 +668,7 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-topics button { font-size:13px; padding:5px 10px; border:1px solid var(--rule); border-radius:999px;
   background:var(--field); color:var(--ink); cursor:pointer; }
 .nv-topics button:hover { border-color:var(--kept); }
+.nv-topics button { display:inline-flex; align-items:center; }
 .nv-topics button span { color:var(--graphite); margin-left:6px; font-variant-numeric:tabular-nums; }
 
 .nv-map { position:relative; height:clamp(480px, 68vh, 760px); border:1px solid var(--rule); border-radius:4px; overflow:hidden;
@@ -570,7 +699,7 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-map-card[hidden] { display:none; }
 .nv-map-x { position:absolute; top:6px; right:8px; border:none; background:none; font-size:20px; line-height:1;
   color:var(--graphite); cursor:pointer; padding:4px; }
-.nv-map-kicker { display:block; font-size:13px; font-weight:600; color:var(--kept); margin:0 24px 4px 0; padding:0; border:none; background:none; text-align:left; cursor:pointer; }
+.nv-map-kicker { display:block; font-size:13px; font-weight:600; color:var(--ink); margin:0 24px 4px 0; padding:0; border:none; background:none; text-align:left; cursor:pointer; }
 p.nv-map-kicker { cursor:default; }
 .nv-map-title { display:block; font-family:var(--serif); font-size:19px; line-height:1.3; font-weight:500;
   color:var(--ink); margin:0 20px 0 0; text-decoration:none; text-align:left; padding:0 !important; }
@@ -585,6 +714,19 @@ a.nv-map-title:hover { text-decoration:underline; text-decoration-color:var(--ke
 .nv-map-card li span { display:block; font-size:12px; color:var(--graphite); margin-top:2px; }
 .nv-map .scene-tooltip { font-family:inherit; font-size:13px; line-height:1.4; max-width:320px; white-space:normal;
   padding:6px 9px; border-radius:4px; background:var(--ink) !important; color:var(--paper) !important; }
+
+/* topic colours: a dot in the topic's colour beside its name; the text itself stays in ink */
+.nv-dot::before { content:""; display:inline-block; width:.62em; height:.62em; border-radius:50%;
+  background:var(--c, var(--topic-other)); margin-right:.45em; vertical-align:.06em; flex:none; }
+.nv-topic { display:inline-flex; align-items:center; margin-left:10px; padding:0 7px 0 6px; border-radius:999px;
+  font-size:12px; line-height:1.6; color:var(--ink); white-space:nowrap; max-width:22em; overflow:hidden;
+  text-overflow:ellipsis; background:color-mix(in srgb, var(--c) 14%, transparent); }
+.nv-topic::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--c); margin-right:5px;
+  flex:none; }
+.nv-theme { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:13px; color:var(--graphite); }
+.nv-theme select { font:inherit; font-size:13px; color:var(--ink); background:var(--field); padding:4px 8px;
+  border:1px solid var(--rule); border-radius:4px; cursor:pointer; }
+.nv-theme select:focus-visible { outline:2px solid var(--kept); outline-offset:2px; }
 
 /* the question history, under the examples on the Ask tab */
 .nv-hist-head { align-items:center !important; justify-content:space-between !important; margin-top:20px;
@@ -642,6 +784,8 @@ button.nv-hist-clear { border:1px solid var(--rule) !important; padding:3px 10px
   .nv-item .t { font-size:17px; }
 }
 """
+CSS = CSS.replace("%(topics_light)s", _topic_vars(TOPIC_LIGHT, "#9AA3B2")).replace(
+    "%(topics_dark)s", _topic_vars(TOPIC_DARK, "#5C6680")).replace("%(themes)s", theme_css())
 
 
 def theme() -> gr.themes.Base:
@@ -713,7 +857,10 @@ def masthead_html(store: CorpusStore) -> str:
     else:
         line = (f"{s['total']:,} papers and posts from arXiv, Hugging Face Daily Papers and AI lab blogs, "
                 f"updated {ago(s['last_refresh'])}.")
-    return f'<header class="nv-masthead"><h1>AI Research Navigator</h1><p>{line}</p></header>'
+    options = "".join(f'<option value="{v}">{label}</option>' for v, label in THEMES)
+    menu = (f'<label class="nv-theme">Theme <select class="nv-theme-pick" aria-label="Colour theme">{options}'
+            f'</select></label>')
+    return f'<header class="nv-masthead"><h1>AI Research Navigator</h1><p>{line}</p>{menu}</header>'
 
 
 # ---------------------------------------------------------------- landing: stats, papers per day, topics
@@ -745,8 +892,8 @@ def papers_chart(days: list[tuple[date, int, int]]) -> str:
                     f'data-nv-day="{d.isoformat()}" data-nv-label="{label}" aria-label="{tip}. Show on the map">'
                     f'<i style="height:{max(4, 100 * papers / top) if papers else 0:.1f}%;--tone:{tone}%"></i>'
                     f'<span class="tip">{tip}</span></span>')
-    xlabs = (f'<span>{days[0][0].strftime("%-d %b")}</span><span class="mid">older papers paler, '
-             f'newer a stronger teal</span><span>{today.strftime("%-d %b")}</span>')
+    xlabs = (f'<span>{days[0][0].strftime("%-d %b")}</span><span class="mid">older days paler, '
+             f'newer stronger</span><span>{today.strftime("%-d %b")}</span>')
     total = sum(p for _, p, _ in days)
     best = max(days, key=lambda x: x[1])
     rows_ = "".join(f"<tr><td>{d.strftime('%a %-d %b')}</td><td>{p:,}</td><td>{b:,}</td></tr>"
@@ -761,12 +908,14 @@ def papers_chart(days: list[tuple[date, int, int]]) -> str:
 def map_intro_html(topics: list[dict]) -> str:
     """The caption under the research map, with the largest topics as fly-to chips."""
     biggest = sorted(enumerate(topics), key=lambda gt: -gt[1]["size"])[:8]
-    chips = "".join(f'<li><button type="button" data-nv-topic="{g}">{html.escape(t["label"])}'
-                    f'<span>{t["size"]:,}</span></button></li>' for g, t in biggest)
+    chips = "".join(f'<li><button type="button" class="nv-dot" style="--c:{topic_var(t.get("slot"))}" '
+                    f'data-nv-topic="{g}">{html.escape(t["label"])}<span>{t["size"]:,}</span></button></li>'
+                    for g, t in biggest)
     pick = f' Pick a topic to fly there:</p><ul class="nv-topics">{chips}</ul>' if chips else "</p>"
     return (f'<section class="nv-map-intro"><h2 class="nv-land-h">Map of the papers</h2><p class="nv-land-note">'
             f'Every paper is a point, placed by what it is about. Papers on the same subject cluster around a '
-            f'topic, named by its most typical title words.{pick}</section>')
+            f'topic, named by its most typical title words. Related topics are grouped into fields that share a '
+            f'colour; older papers are paler.{pick}</section>')
 
 
 def landing_html(stats: dict) -> str:
@@ -807,7 +956,7 @@ def row(it: NewsItem, query: str = "", chars: int = 380) -> str:
         extra += f'<a class="pdf" href="{html.escape(it.pdf_url)}" target="_blank" rel="noopener">PDF</a>'
 
     return (f'<article class="nv-item"><a class="t" href="{html.escape(it.url)}" target="_blank" rel="noopener">'
-            f'{highlight(it.title, query)}</a>{_meta(it.source, it.source_type, it.published, it.upvotes, extra)}'
+            f'{highlight(it.title, query)}</a>{_meta(it.source, it.source_type, it.published, it.upvotes, extra + _topic_tag(it.url))}'
             f'<p class="s">{highlight(summary, query)}</p></article>')
 
 
@@ -924,7 +1073,7 @@ def _ref_item(n: int, c: Candidate) -> str:
         body = f'<p class="d ab"><span class="lbl">From the abstract</span>{html.escape(text)}</p>' if text else ""
     return (f'<li id="nv-ref-{n}"><span class="n">[{n}]</span><div>'
             f'<a class="t" href="{html.escape(c["url"])}" target="_blank" rel="noopener">{html.escape(c["title"])}</a>'
-            f'{_meta(c["source"], c.get("source_type", "paper"), c["published"], c.get("upvotes", 0), _score_badge(c))}'
+            f'{_meta(c["source"], c.get("source_type", "paper"), c["published"], c.get("upvotes", 0), _score_badge(c) + _topic_tag(c["url"]))}'
             f'{body}</div></li>')
 
 
@@ -1219,6 +1368,9 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
     def landing() -> tuple[str, str, str]:
         s = collection_stats(store)
         return map_intro_html(research_map(store)["topics"]), landing_html(s), trend_html(s)
+
+    global _topic_lookup
+    _topic_lookup = lambda url: topic_of(store).get(url)  # noqa: E731
 
     def _picked(ids: list[str]) -> list[NewsItem]:
         with store._lock:

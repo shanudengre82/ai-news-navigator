@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import numpy as np
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
-from ai_news.atlas import build_map, collection_stats, research_map
+from ai_news.atlas import FIELDS, build_map, collection_stats, research_map, topic_of
 from ai_news.store import CorpusStore
 from ai_news.ui import landing_html, map_intro_html, papers_chart, trend_html
 from conftest import make_item
@@ -46,6 +46,29 @@ def test_map_structure_and_topics():
     assert same / len(pairs) > 0.9
     labels = " ".join(t["label"] for t in m["topics"])
     assert any(w in labels for w in ("diffusion", "reinforcement", "retrieval", "robot", "speech"))
+
+
+def test_topics_are_grouped_into_coloured_fields():
+    items = _papers(400)
+    m = build_map(items, _clustered_vectors(400))
+    topics = m["topics"]
+    slots = [t["slot"] for t in topics if t["size"]]
+    assert None not in slots, "every topic with papers belongs to a field"
+    assert sorted(set(slots)) == list(range(min(FIELDS, len(slots))))
+    field_size = {f: sum(t["size"] for t in topics if t["slot"] == f) for f in set(slots)}
+    assert [field_size[f] for f in sorted(field_size)] == sorted(field_size.values(), reverse=True)
+
+
+def test_topic_of_maps_paper_urls(tmp_path):
+    store = CorpusStore(tmp_path, DeterministicFakeEmbedding(size=16))
+    papers = _papers(30)
+    store.add(papers + [make_item("A lab blog post", source="Some Blog", source_type="blog",
+                                  url="https://blog.example/post")])
+    tags = topic_of(store)
+    assert papers[0].url in tags and "https://blog.example/post" not in tags
+    label, slot = tags[papers[0].url]
+    assert label and 0 <= slot < FIELDS
+    assert topic_of(store) is tags  # cached until the store changes
 
 
 def test_research_map_papers_only_capped_and_cached(tmp_path):
@@ -109,3 +132,25 @@ def test_papers_chart_bars_and_table():
     assert "so far today" in out  # the last day is today, still filling
     assert "<table>" in out
     assert 'data-nv-day="2026-10-01"' in out and "--tone:0%" in out and "--tone:100%" in out
+
+
+def test_topic_colour_in_chips_and_tags(monkeypatch):
+    import ai_news.ui as ui
+    out = map_intro_html([{"label": "agents", "size": 9, "pos": [0, 0, 0], "slot": 0},
+                          {"label": "misc", "size": 2, "pos": [0, 0, 0], "slot": None}])
+    assert "--c:var(--topic-1)" in out and "--c:var(--topic-other)" in out
+    monkeypatch.setattr(ui, "_topic_lookup", lambda url: ("agents", 2) if url == "https://on.map" else None)
+    on = make_item("On the map", url="https://on.map")
+    off = make_item("Not on the map", url="https://off.map")
+    assert 'class="nv-topic" style="--c:var(--topic-3)"' in ui.row(on) and "nv-topic" not in ui.row(off)
+    ref = {"title": "On the map", "url": "https://on.map", "source": "arXiv", "published": on.published}
+    assert "nv-topic" in ui._ref_item(1, ref)
+
+
+def test_theme_menu_and_css(store):
+    import ai_news.ui as ui
+    head = ui.masthead_html(store)
+    assert 'class="nv-theme-pick"' in head and all(f'value="{v}"' in head for v, _ in ui.THEMES)
+    for name in ("mono", "sunset", "ocean"):
+        assert f'html[data-nv-theme="{name}"], ' in ui.CSS and f'html[data-nv-theme="{name}"] .dark' in ui.CSS
+    assert "--topic-1:#2a78d6" in ui.CSS and "%(" not in ui.CSS
