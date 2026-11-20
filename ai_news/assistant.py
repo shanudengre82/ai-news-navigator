@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, Iterator
 
+from ai_news.observability import RagTracer
 from ai_news.store import CorpusStore
 from ai_news.ui import REF_PAGE, answer_md, references_html, sieve_html
 
@@ -53,13 +54,20 @@ def run_events(graph, store: CorpusStore, question: str, history: list[str], fil
         store.reload_if_stale()
         total = len(store.items)
         state = {"question": question, "history": history, "filters": filters}
-        final: dict = {}
-        for update in graph.stream(state, stream_mode="updates"):
-            for node, delta in update.items():
-                trace += delta.get("trace", [])
-                steps.append(step_of(node, delta))
-                final.update(delta)
-                yield {"total": total, "steps": list(steps), "trace": list(trace)}
+        final: dict = dict(state)
+        with RagTracer(question, corpus_size=total, filters=filters, history_len=len(history)) as tracer:
+            cbs = tracer.langchain_callbacks()
+            stream_kwargs: dict[str, Any] = {"stream_mode": "updates"}
+            if cbs:
+                stream_kwargs["config"] = {"callbacks": cbs}
+            for update in graph.stream(state, **stream_kwargs):
+                for node, delta in update.items():
+                    trace += delta.get("trace", [])
+                    steps.append(step_of(node, delta))
+                    final.update(delta)
+                    tracer.record_node(node, delta)
+                    yield {"total": total, "steps": list(steps), "trace": list(trace)}
+            tracer.finish(final)
         yield {"total": total, "steps": list(steps), "trace": list(trace),
                "answer": final.get("answer") or "No answer was produced. Please ask again.",
                "references": final.get("references", []), "summarized": final.get("summarized", 0)}

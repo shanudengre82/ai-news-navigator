@@ -21,6 +21,8 @@ from ai_news.rag.nodes import RagNodes  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
 from ai_news import scheduler  # noqa: E402
 from ai_news.assistant import message_text, render, run_events  # noqa: E402
+from ai_news.guardrails import MAX_DRAFT_CHARS, check_input, check_output  # noqa: E402
+from ai_news.observability import trace_polish_run  # noqa: E402
 from ai_news.post import keep_links  # noqa: E402
 from ai_news.rag.prompts import POLISH  # noqa: E402
 from ai_news.ui import CSS, FIT_JS, FONTS_HEAD, REF_PAGE, STEPS_EMPTY, THEME_JS, build_ui, theme  # noqa: E402
@@ -37,7 +39,12 @@ store.load()
 # ---- models: loaded once at import; ZeroGPU streams them to the GPU on the first @spaces.GPU call ----
 llm = load_chat_model(settings.llm_backend, settings.llm_model_id, settings.llm_max_new_tokens, settings.hf_token)
 reranker = Reranker(settings.rerank_model_id)
-graph = build_graph(RagNodes(llm, store, reranker, live_search=arxiv.search))
+graph = build_graph(RagNodes(
+    llm, store, reranker, live_search=arxiv.search,
+    guardrails_enabled=settings.guardrails_enabled,
+    pii_mode=settings.guardrails_pii_mode,
+    max_query_chars=settings.guardrails_max_query_chars,
+))
 
 sources_cfg = load_sources(settings.sources_file)
 SOURCE_NAMES = (["arXiv"] if sources_cfg.get("arxiv", {}).get("enabled") else []) + \
@@ -102,15 +109,34 @@ def _polish_gpu(draft: str) -> str:
 
 
 def polish_post(draft: str) -> tuple[str, str]:
-    """Rewrite a draft post with the LLM; returns (text, note). Keeps the draft if the rewrite fails or drops a
-    link, and says why in the note."""
+    """Rewrite a draft post with the LLM; returns (text, note). Applies input/output guardrails and PII
+    redaction, keeps the draft if the rewrite fails or drops a link, and traces the run in Langfuse."""
     if not draft or not draft.strip():
         return draft, "Build a draft first."
+    ig = check_input(
+        draft,
+        enabled=settings.guardrails_enabled,
+        pii_mode=settings.guardrails_pii_mode,
+        max_chars=MAX_DRAFT_CHARS,
+    )
+    if not ig.allowed:
+        note = ig.blocked_reason or "The draft was blocked by safety/privacy guardrails."
+        trace_polish_run(draft, draft, note, blocked=True, pii_detected=ig.pii.had_pii)
+        return draft, note
     try:
-        return keep_links(draft, _polish_gpu(draft))
+        raw = _polish_gpu(ig.sanitized_text)
+        og = check_output(raw, enabled=settings.guardrails_enabled)
+        out, note = keep_links(ig.sanitized_text, og.text)
+        if ig.pii.had_pii and not note:
+            note = f"Rewritten with AI (redacted PII: {', '.join(ig.pii.entity_types)}). Check it before posting."
+        trace_polish_run(ig.sanitized_text, out, note, blocked=False,
+                         pii_detected=ig.pii.had_pii or og.pii.had_pii)
+        return out, note
     except Exception as e:
         log.exception("ZeroGPU rewrite failed")
-        return draft, f"The rewrite did not run ({type(e).__name__}). The draft is unchanged; try again later."
+        note = f"The rewrite did not run ({type(e).__name__}). The draft is unchanged; try again later."
+        trace_polish_run(ig.sanitized_text, draft, note, blocked=False, pii_detected=ig.pii.had_pii)
+        return draft, note
 
 
 demo = build_ui(store, SOURCE_NAMES, research_assistant, run_refresh, pull_mode=settings.refresh_mode == "pull",

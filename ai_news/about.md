@@ -8,6 +8,66 @@ followed by every matching reference.
 Everything here is open source and runs on free tiers: Hugging Face Spaces with ZeroGPU for the app, a
 Hugging Face dataset for storage and GitHub Actions for the daily collection. No paid API is involved.
 
+### System architecture and data flow
+
+```mermaid
+flowchart TD
+    subgraph Ingestion["1. Daily Data Ingestion & Sync (CPU / GitHub Actions)"]
+        S1["arXiv API & RSS"] --> F["Fetchers & Deduplication"]
+        S2["HF Daily Papers"] --> F
+        S3["AI Blog RSS Feeds"] --> F
+        F --> E["BGE-small-en-v1.5 Embeddings"]
+        E --> Store[("CorpusStore: items.parquet + index.faiss + BM25")]
+        Store <--> HFDS[("HF Dataset Repo")]
+    end
+
+    subgraph Entry["2. User Interfaces & API"]
+        UI_Ask["Ask Tab / MCP Tool"]
+        UI_Search["Search Tab (BM25) & Latest Tab"]
+        UI_Map["3D Research Map (FAISS KMeans + PCA)"]
+        UI_Post["Post Tab (Weekly LinkedIn Draft)"]
+    end
+
+    Store --> UI_Search
+    Store --> UI_Map
+    Store --> UI_Post
+
+    subgraph RAG["3. Guardrailed Corrective-RAG Pipeline (LangGraph + ZeroGPU)"]
+        UI_Ask --> IG["input_guardrail: PII Redaction, Length, Injection & Safety"]
+        IG -->|"Blocked"| BlockOut["Safe Refusal Response"]
+        IG -->|"Allowed (PII Redacted)"| Analyze["analyze_query (LLM JSON: intent, queries, filters)"]
+        Analyze --> Retrieve["retrieve (BM25 + FAISS -> RRF Top 300)"]
+        Store -.-> Retrieve
+        Retrieve --> Rerank["rerank (bge-reranker-base x recency/upvotes)"]
+        Rerank --> Sanitize["Sanitize Retrieved Abstracts (Indirect Injection Defense)"]
+        Sanitize --> Grade["grade_documents (LLM Judge + Digests)"]
+        Grade -->|"Few relevant (retry 0)"| Rewrite["rewrite_query (LLM)"]
+        Rewrite --> Retrieve
+        Grade -->|"Still few (retry 1)"| Live["live_search (arXiv API)"]
+        Live -.->|"Grows corpus"| Store
+        Live --> Rerank
+        Grade -->|"Enough relevant / exhausted"| Gen["generate (Cited Prose + Start With)"]
+        Gen --> OG["output_guardrail: Citation Grounding, URL Check & Output PII"]
+        OG --> FinalOut["Answer + Sieve + Filterable References"]
+    end
+
+    subgraph PostAI["4. Guardrailed Post Rewrite"]
+        UI_Post -->|"Rewrite with AI"| P_IG["Input Guardrail & PII Check"]
+        P_IG --> P_LLM["LLM Polish (ZeroGPU)"]
+        P_LLM --> P_OG["Output PII + Link Preservation Check"]
+    end
+
+    subgraph Obs["5. Langfuse Observability & Evaluation (PII-Redacted, Fork-Safe)"]
+        LF_Trace["Root Trace + LangChain CallbackHandler"]
+        LF_Spans["Structured Spans: Guardrails, Retrieve, Rerank, Grade"]
+        LF_Scores["Automated Scores: Retrieval Quality & Answer Quality"]
+        LF_Trace --> LF_Spans --> LF_Scores
+    end
+
+    RAG -.->|"Redacted objects & scores (flush before fork exit)"| Obs
+    PostAI -.->|"Redacted trace & scores"| Obs
+```
+
 ### How a question becomes a reading list
 
 1. **Understand the question.** The LLM (Qwen2.5-7B-Instruct) turns your question into one to three search
@@ -119,6 +179,13 @@ first, then the newest). It is rebuilt only when the collection changes and take
 | **`huggingface_hub`** + **`hf` CLI** | The Python client and command-line tool for the Hub | `snapshot_download` and `upload_folder` move the data to and from the dataset; the CLI uploads the code to the Space. | `ai_news/store.py`, `.github/workflows/` |
 | **GitHub Actions** | Free CI/CD from GitHub | `sync-to-hf.yml` deploys the code to the Space on every push. `refresh-corpus.yml` collects new items every 12 hours on a CPU runner and pushes them to the dataset. | `.github/workflows/` |
 | **Refresh scheduler** | A background thread in the app | In `pull` mode (the setting used on the Space), it downloads the newest dataset copy every hour. In `fetch` mode it collects the sources itself. | `ai_news/scheduler.py`, `ai_news/ingest.py` |
+
+### Guardrails, PII checks and observability
+
+| Component | What it is | What it does in this project | Where |
+|---|---|---|---|
+| **Guardrails & PII checker** | Our own deterministic, dependency-free safety layer | Runs on every Ask and Post-rewrite boundary. Detects and redacts PII/secrets (emails, phone numbers, SSNs, Luhn-validated credit cards, IPv4s, API keys/JWTs) before text reaches the LLM or traces; blocks prompt-injection overrides and unsafe requests while allowing AI-safety research queries; sanitizes scraped abstracts against indirect prompt injection; and validates inline `[n]` citations and URLs on output. | `ai_news/guardrails.py`, `ai_news/rag/nodes.py`, `app.py` |
+| **Langfuse** (`langfuse`) | Open-source LLM observability and evaluation platform | Optional, fork-safe tracing for the RAG graph and post rewriter. Captures LangChain/LangGraph generations plus structured snapshots of retrieved candidates, reranker score distributions, LLM judge verdicts and guardrail outcomes (always PII-redacted), and posts automated retrieval-quality and answer-quality scores (`retrieval_*`, `answer_*`, `guardrail_*`) to every trace. | `ai_news/observability.py`, `ai_news/assistant.py`, `app.py` |
 
 ### Quality checks
 

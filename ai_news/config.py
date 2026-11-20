@@ -36,5 +36,18 @@ class Settings:
     refresh_on_start: bool = field(default_factory=lambda: _bool("REFRESH_ON_START", True))
     push_to_hub: bool = field(default_factory=lambda: _bool("PUSH_TO_HUB", True))
 
+    # Guardrails & PII checks
+    guardrails_enabled: bool = field(default_factory=lambda: _bool("GUARDRAILS_ENABLED", True))
+    guardrails_pii_mode: str = field(default_factory=lambda: os.getenv("GUARDRAILS_PII_MODE", "redact").strip().lower())
+    guardrails_max_query_chars: int = field(default_factory=lambda: int(os.getenv("GUARDRAILS_MAX_QUERY_CHARS", "2000")))
+
+    # Langfuse observability & evaluation (auto-enabled when both keys are set)
+    langfuse_public_key: str | None = field(default_factory=lambda: os.getenv("LANGFUSE_PUBLIC_KEY") or None)
+    langfuse_secret_key: str | None = field(default_factory=lambda: os.getenv("LANGFUSE_SECRET_KEY") or None)
+    langfuse_host: str = field(default_factory=lambda: os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"))
+    langfuse_enabled: bool = field(default_factory=lambda: _bool(
+        "LANGFUSE_ENABLED", bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))))
+    langfuse_llm_judge: bool = field(default_factory=lambda: _bool("LANGFUSE_LLM_JUDGE", False))
+
 
 settings = Settings()

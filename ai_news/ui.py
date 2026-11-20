@@ -1137,8 +1137,10 @@ STEP_LABEL = {
     "generate": "In the results",
 }
 STEP_NOTE = {
+    "input_guardrail": "Checking safety and privacy",
     "analyze_query": "Reading your question",
     "rewrite_query": "Too few were relevant, so the question was reworded and searched again",
+    "output_guardrail": "Verifying citations and privacy",
 }
 STEPS_EMPTY = ("<div class='nv-steps-empty'>As the assistant works, this panel shows how the collection is "
                "narrowed, with the real count at each step:<ol>"
@@ -1168,8 +1170,8 @@ def sieve_html(total: int, steps: list[dict], trace: list[str] | None = None, wo
         new = " new" if i == len(steps) - 1 else ""
         node, count = st["node"], st.get("count")
         if node in STEP_NOTE:
-            if node == "analyze_query" and i != len(steps) - 1:
-                continue  # only show "reading your question" while it is the current step
+            if node in ("input_guardrail", "analyze_query", "output_guardrail") and i != len(steps) - 1:
+                continue  # only show transient check/reading steps while they are the current step
             out.append(f'<div class="nv-step note{new}"><span class="label">{STEP_NOTE[node]}</span></div>')
             continue
         if node == "live_search":

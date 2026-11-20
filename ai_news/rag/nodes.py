@@ -13,6 +13,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from ai_news.fetchers.common import parse_iso
+from ai_news.guardrails import MAX_QUERY_CHARS, check_input, check_output, sanitize_document
 from ai_news.rag import prompts
 from ai_news.rag.state import Candidate, GraphState
 from ai_news.schema import NewsItem
@@ -60,17 +61,23 @@ def recency_boost(published: str, half_life_days: float = 30.0) -> float:
 
 def format_docs(cands: list[Candidate], summary_chars: int) -> str:
     return "\n\n".join(
-        f"[{n}] {c['title']} ({c['source']}, {c['published'][:10]})\n{c['summary'][:summary_chars]}"
+        f"[{n}] {sanitize_document(c['title'])} ({c['source']}, {c['published'][:10]})\n"
+        f"{sanitize_document(c['summary'][:summary_chars])}"
         for n, c in enumerate(cands, 1))
 
 
 class RagNodes:
     def __init__(self, llm: BaseChatModel, store: CorpusStore, reranker=None,
-                 live_search: Callable[[str], list[NewsItem]] | None = None):
+                 live_search: Callable[[str], list[NewsItem]] | None = None,
+                 guardrails_enabled: bool = True, pii_mode: str = "redact",
+                 max_query_chars: int = MAX_QUERY_CHARS):
         self.llm = llm
         self.store = store
         self.reranker = reranker
         self.live_search_fn = live_search
+        self.guardrails_enabled = guardrails_enabled
+        self.pii_mode = pii_mode
+        self.max_query_chars = max_query_chars
 
     def _ask(self, prompt: str) -> str:
         return self.llm.invoke([HumanMessage(content=prompt)]).content
@@ -82,6 +89,41 @@ class RagNodes:
             f.get("days") or state.get("days")
 
     # ---- nodes ----
+    def input_guardrail(self, state: GraphState) -> dict:
+        res = check_input(
+            state.get("question", ""),
+            state.get("history") or [],
+            enabled=self.guardrails_enabled,
+            pii_mode=self.pii_mode,
+            max_chars=self.max_query_chars,
+        )
+        pii_list = [f.to_dict() for f in res.pii.findings]
+        if not res.allowed:
+            return {
+                "question": res.sanitized_text,
+                "history": res.sanitized_history,
+                "guardrail_blocked": True,
+                "guardrail_reason": res.blocked_reason,
+                "guardrail_flags": res.flags,
+                "pii_findings": pii_list,
+                "answer": res.blocked_reason or "Request blocked by input guardrails.",
+                "references": [],
+                "summarized": 0,
+                "trace": [f"**Input guardrail** → blocked ({', '.join(res.flags) or 'policy'})"],
+            }
+        note = f"redacted PII: {', '.join(res.pii.entity_types)}" if res.pii.had_pii else "ok"
+        return {
+            "question": res.sanitized_text,
+            "history": res.sanitized_history,
+            "guardrail_blocked": False,
+            "guardrail_reason": None,
+            "guardrail_flags": res.flags,
+            "pii_findings": pii_list,
+            "trace": [f"**Input guardrail** → {note}"],
+        }
+
+    def route_after_input_guardrail(self, state: GraphState) -> str:
+        return "end" if state.get("guardrail_blocked") else "analyze_query"
     def analyze_query(self, state: GraphState) -> dict:
         q = state["question"]
         hist = state.get("history") or []
@@ -149,6 +191,7 @@ class RagNodes:
         matches = sorted((c for c in merged.values() if verdicts.get(c["id"], {}).get("relevant", True)),
                          key=lambda c: c.get("score", 0), reverse=True)
         return {"matches": matches, "ranked": ranked,
+                "pool_size": len(cands), "rerank_kept": len(kept),
                 "trace": [f"**Rerank** (cross-encoder, relevance ≥ {MIN_RELEVANCE}, × recency/upvotes) → "
                           f"{len(kept)} of {len(cands)} kept, {len(matches)} matches in total"]}
 
@@ -244,3 +287,29 @@ class RagNodes:
         padded = f" ({len(refs) - n_pad} + {n_pad} low-match to reach {MIN_RESULTS})" if n_pad else ""
         return {"answer": answer, "references": refs, "summarized": len(used),
                 "trace": [f"**Generate** → summary from {len(used)} sources, {len(refs)} references{padded}"]}
+
+    def output_guardrail(self, state: GraphState) -> dict:
+        refs = state.get("references") or []
+        summarized = int(state.get("summarized") or 0)
+        max_cite = summarized if summarized > 0 else len(refs)
+        allowed_urls = [r["url"] for r in refs if r.get("url")] if refs else None
+        res = check_output(
+            state.get("answer") or "",
+            max_citation=max_cite if refs else None,
+            allowed_urls=allowed_urls,
+            enabled=self.guardrails_enabled,
+        )
+        meta = {
+            "valid_citations": res.valid_citations,
+            "invalid_citations": res.invalid_citations,
+            "hallucinated_urls": res.hallucinated_urls,
+            "pii_redacted": res.pii.had_pii,
+            "pii_findings": [f.to_dict() for f in res.pii.findings],
+            "flags": res.flags,
+        }
+        note = ", ".join(res.flags) if res.flags else "ok"
+        return {
+            "answer": res.text,
+            "output_guardrail": meta,
+            "trace": [f"**Output guardrail** → {note}"],
+        }

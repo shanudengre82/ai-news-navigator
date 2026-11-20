@@ -1,8 +1,9 @@
-"""Corrective / adaptive RAG graph:
+"""Corrective / adaptive RAG graph with systematic input & output guardrails:
 
-analyze → retrieve → rerank → grade ─┬─(≥3 relevant)──────────────→ generate
-                                      ├─(few, first try)→ rewrite → retrieve …
-                                      └─(still few)→ live arXiv search → rerank …
+input_guardrail ─┬─(blocked)────────────────────────────────────────────→ END
+                 └─(allowed)→ analyze → retrieve → rerank → grade ─┬─(≥3 relevant)────────────→ generate → output_guardrail → END
+                                                                    ├─(few, first try)→ rewrite → retrieve …
+                                                                    └─(still few)→ live arXiv search → rerank …
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from ai_news.rag.state import GraphState
 
 def build_graph(nodes: RagNodes):
     g = StateGraph(GraphState)
+    g.add_node("input_guardrail", nodes.input_guardrail)
     g.add_node("analyze_query", nodes.analyze_query)
     g.add_node("retrieve", nodes.retrieve)
     g.add_node("rerank", nodes.rerank)
@@ -22,8 +24,11 @@ def build_graph(nodes: RagNodes):
     g.add_node("rewrite_query", nodes.rewrite_query)
     g.add_node("live_search", nodes.live_search)
     g.add_node("generate", nodes.generate)
+    g.add_node("output_guardrail", nodes.output_guardrail)
 
-    g.add_edge(START, "analyze_query")
+    g.add_edge(START, "input_guardrail")
+    g.add_conditional_edges("input_guardrail", nodes.route_after_input_guardrail,
+                            {"analyze_query": "analyze_query", "end": END})
     g.add_edge("analyze_query", "retrieve")
     g.add_edge("retrieve", "rerank")
     g.add_edge("rerank", "grade_documents")
@@ -31,5 +36,6 @@ def build_graph(nodes: RagNodes):
                             ["generate", "rewrite_query", "live_search"])
     g.add_edge("rewrite_query", "retrieve")
     g.add_edge("live_search", "rerank")
-    g.add_edge("generate", END)
+    g.add_edge("generate", "output_guardrail")
+    g.add_edge("output_guardrail", END)
     return g.compile()

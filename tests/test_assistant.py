@@ -26,11 +26,13 @@ def test_run_events_streams_trace_then_answer(store):
     events = list(run_events(_graph(store, [analyze, grade, "Answer [1]."]), store,
                              "test-time compute", ["an earlier question"], {}))
     assert all("trace" in e and "steps" in e for e in events)
-    assert [st["node"] for st in events[-1]["steps"]] == ["analyze_query", "retrieve", "rerank",
-                                                          "grade_documents", "generate"]
+    assert [st["node"] for st in events[-1]["steps"]] == [
+        "input_guardrail", "analyze_query", "retrieve", "rerank",
+        "grade_documents", "generate", "output_guardrail",
+    ]
     assert events[-1]["total"] == len(store.items)
     assert events[-1]["answer"] == "Answer [1]." and events[-1]["references"]
-    assert len(events) == 6  # five nodes + final
+    assert len(events) == 8  # seven nodes + final
 
 
 def test_run_events_reports_errors_instead_of_raising(store):

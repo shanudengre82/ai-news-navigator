@@ -40,4 +40,11 @@ class GraphState(TypedDict, total=False):
     answer: str
     references: list[Candidate]
     summarized: int             # how many of the references the summary was written from
+    pool_size: int              # candidates scored by the reranker (for retrieval metrics)
+    rerank_kept: int            # candidates kept above MIN_RELEVANCE (for retrieval metrics)
+    guardrail_blocked: bool     # True when input_guardrail short-circuits the graph
+    guardrail_reason: str | None
+    guardrail_flags: list[str]
+    pii_findings: list[dict]    # entity_type + count only (never raw PII)
+    output_guardrail: dict      # citation validity, URL check, output PII metadata
     trace: Annotated[list[str], operator.add]
