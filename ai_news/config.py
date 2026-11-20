@@ -27,6 +27,14 @@ class Settings:
     llm_max_new_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_NEW_TOKENS", "700")))
     embed_model_id: str = field(default_factory=lambda: os.getenv("EMBED_MODEL_ID", "BAAI/bge-small-en-v1.5"))
     rerank_model_id: str = field(default_factory=lambda: os.getenv("RERANK_MODEL_ID", "BAAI/bge-reranker-base"))
+    # Stage-2 fine cross-encoder re-reranker (set to "" or "none" to disable Stage 2 on small GPUs).
+    rerank_stage2_model_id: str | None = field(default_factory=lambda: (
+        None if os.getenv("RERANK_STAGE2_MODEL_ID", "BAAI/bge-reranker-v2-m3").strip().lower() in {"", "none", "false", "0"}
+        else os.getenv("RERANK_STAGE2_MODEL_ID", "BAAI/bge-reranker-v2-m3").strip()
+    ))
+    rerank_stage1_top_k: int = field(default_factory=lambda: int(os.getenv("RERANK_STAGE1_TOP_K", "40")))
+    rerank_stage2_weight: float = field(default_factory=lambda: float(os.getenv("RERANK_STAGE2_WEIGHT", "0.7")))
+    rerank_mmr_lambda: float = field(default_factory=lambda: float(os.getenv("RERANK_MMR_LAMBDA", "0.85")))
 
     # "fetch": the Space fetches feeds itself; "pull": it only re-downloads the snapshot that the
     # GitHub Action (.github/workflows/refresh-corpus.yml) pushes to DATASET_REPO.
@@ -41,7 +49,9 @@ class Settings:
     guardrails_pii_mode: str = field(default_factory=lambda: os.getenv("GUARDRAILS_PII_MODE", "redact").strip().lower())
     guardrails_max_query_chars: int = field(default_factory=lambda: int(os.getenv("GUARDRAILS_MAX_QUERY_CHARS", "2000")))
 
-    # Langfuse observability & evaluation (auto-enabled when both keys are set)
+    # Provider-agnostic observability ("auto", "none", "langfuse", or a registered custom backend).
+    # In "auto" mode, Langfuse is skipped completely whenever its credentials are missing.
+    observability_backend: str = field(default_factory=lambda: os.getenv("OBSERVABILITY_BACKEND", "auto").strip().lower())
     langfuse_public_key: str | None = field(default_factory=lambda: os.getenv("LANGFUSE_PUBLIC_KEY") or None)
     langfuse_secret_key: str | None = field(default_factory=lambda: os.getenv("LANGFUSE_SECRET_KEY") or None)
     langfuse_host: str = field(default_factory=lambda: os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"))

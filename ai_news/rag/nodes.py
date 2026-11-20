@@ -165,34 +165,72 @@ class RagNodes:
         return {"candidates": cands,
                 "trace": [f"**Retrieve** (BM25 + FAISS, RRF) → {len(cands)} candidates"]}
 
+    def _stored_vectors(self, cands: list[Candidate]) -> dict[str, Any]:
+        """Fetch already-indexed embeddings from CorpusStore without re-embedding."""
+        from ai_news.store import faiss_id
+        if not self.store or not len(self.store.vectors):
+            return {}
+        with self.store._lock:
+            present = [c["id"] for c in cands if faiss_id(c["id"]) in self.store._by_faiss_id]
+            if not present:
+                return {}
+            mat = self.store.vectors.get(present)
+        return {cid: mat[i] for i, cid in enumerate(present)}
+
     def rerank(self, state: GraphState) -> dict:
-        """Score the whole pool and keep every item the cross-encoder finds relevant, merged with the
-        matches of earlier passes (after a rewrite or live search). Items the LLM rejected stay out."""
+        """Score the pool with the reranker (two-stage cross-encoder + MMR diversity when available,
+        or single-stage `.score()` fallback), keep every relevant item, and merge with earlier passes."""
         cands = state.get("candidates", [])
         kept = cands
+        stage_note = f"cross-encoder, relevance ≥ {MIN_RELEVANCE}, × recency/upvotes"
+        preserve_mmr_order = False
         if self.reranker and cands:
-            scores = self.reranker.score(state["question"], [f"{c['title']}. {c['summary'][:1000]}" for c in cands])
-            rels = [min(max(s, 0.0), 1.0) for s in scores]  # Reranker.score returns probabilities
-            for c, rel in zip(cands, rels):
-                c["relevance"] = rel
-                # multiplicative, so recency and upvotes only reorder items of similar relevance
-                c["score"] = rel * (1 + 0.25 * recency_boost(c["published"]) + 0.05 * math.log1p(c.get("upvotes", 0)))
-            by_rel = sorted(zip(rels, cands), key=lambda p: p[0], reverse=True)
-            kept = [c for r, c in by_rel if r >= MIN_RELEVANCE]
-            if len(kept) < MIN_KEEP:
-                kept = [c for _, c in by_rel[:MIN_KEEP]]
+            if hasattr(self.reranker, "rerank"):
+                outcome = self.reranker.rerank(
+                    state["question"],
+                    cands,
+                    intent=state.get("intent"),
+                    vectors=self._stored_vectors(cands),
+                    recency_fn=recency_boost,
+                )
+                ordered = outcome.candidates
+                kept = [c for c in ordered if c.get("relevance", 0.0) >= MIN_RELEVANCE]
+                if len(kept) < MIN_KEEP:
+                    kept = ordered[:MIN_KEEP]
+                preserve_mmr_order = outcome.mmr_applied
+                parts = [f"stage1: {outcome.stage1_count}"]
+                if outcome.stage2_count:
+                    parts.append(f"stage2: {outcome.stage2_count}")
+                if outcome.mmr_applied:
+                    parts.append("MMR diversity")
+                stage_note = f"two-stage cross-encoder ({', '.join(parts)}), relevance ≥ {MIN_RELEVANCE}"
+            else:
+                scores = self.reranker.score(state["question"], [f"{c['title']}. {c['summary'][:1000]}" for c in cands])
+                rels = [min(max(s, 0.0), 1.0) for s in scores]  # Reranker.score returns probabilities
+                for c, rel in zip(cands, rels):
+                    c["relevance"] = rel
+                    # multiplicative, so recency and upvotes only reorder items of similar relevance
+                    c["score"] = rel * (1 + 0.25 * recency_boost(c["published"]) + 0.05 * math.log1p(c.get("upvotes", 0)))
+                by_rel = sorted(zip(rels, cands), key=lambda p: p[0], reverse=True)
+                kept = [c for r, c in by_rel if r >= MIN_RELEVANCE]
+                if len(kept) < MIN_KEEP:
+                    kept = [c for _, c in by_rel[:MIN_KEEP]]
         ranked = {c["id"]: c for c in state.get("ranked", [])}
         ranked.update({c["id"]: c for c in cands})
         ranked = sorted(ranked.values(), key=lambda c: (c.get("relevance", 0), c.get("score", 0)),
                         reverse=True)[:RANKED_KEEP]
         verdicts = state.get("verdicts") or {}
-        merged = {c["id"]: c for c in state.get("matches", [])}
-        merged.update({c["id"]: {**merged.get(c["id"], {}), **c} for c in kept})
-        matches = sorted((c for c in merged.values() if verdicts.get(c["id"], {}).get("relevant", True)),
-                         key=lambda c: c.get("score", 0), reverse=True)
+        prev_matches = state.get("matches", [])
+        if preserve_mmr_order and not prev_matches:
+            matches = [c for c in kept if verdicts.get(c["id"], {}).get("relevant", True)]
+        else:
+            merged = {c["id"]: c for c in prev_matches}
+            merged.update({c["id"]: {**merged.get(c["id"], {}), **c} for c in kept})
+            matches = sorted((c for c in merged.values() if verdicts.get(c["id"], {}).get("relevant", True)),
+                             key=lambda c: c.get("score", 0), reverse=True)
         return {"matches": matches, "ranked": ranked,
                 "pool_size": len(cands), "rerank_kept": len(kept),
-                "trace": [f"**Rerank** (cross-encoder, relevance ≥ {MIN_RELEVANCE}, × recency/upvotes) → "
+                "trace": [f"**Rerank** ({stage_note}) → "
                           f"{len(kept)} of {len(cands)} kept, {len(matches)} matches in total"]}
 
     def grade_documents(self, state: GraphState) -> dict:

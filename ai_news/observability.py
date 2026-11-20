@@ -1,16 +1,14 @@
-"""Fork-safe Langfuse observability and automated RAG quality evaluation.
+"""Provider-agnostic observability and automated RAG quality evaluation.
 
-Tracks:
-- Root trace per Ask / Post-rewrite request (always PII-redacted)
-- Automatic LangChain/LangGraph node & LLM generation callbacks
-- Structured snapshots of retrieval, reranking, grading, and guardrail objects
-- Automated retrieval-quality and answer-quality scores posted to Langfuse
-
-ZeroGPU compatibility:
-- Background ingestion threads created in a parent process do not survive `os.fork()`.
-  We register an `os.register_at_fork(after_in_child=...)` hook to reset the cached client,
-  and always `flush()` in a `finally:` block before the GPU worker exits.
-- When Langfuse credentials are not configured, every operation is a zero-cost no-op.
+Design:
+- The rest of the codebase (`assistant.py`, `app.py`, `rag/`) depends ONLY on `RagTracer`,
+  `trace_polish_run`, and `compute_rag_scores` — never on Langfuse directly.
+- When `OBSERVABILITY_BACKEND=none` or Langfuse credentials (`LANGFUSE_PUBLIC_KEY`,
+  `LANGFUSE_SECRET_KEY`) are missing in `auto` mode, all Langfuse imports, tracing, span recording,
+  scoring, and flushing are completely skipped with zero overhead.
+- Custom backends can be plugged in via `register_backend(name, factory)` without touching any
+  application code.
+- Langfuse (optional backend) is fork-safe for ZeroGPU via `os.register_at_fork`.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ import logging
 import os
 import re
 import statistics
-from typing import Any
+from typing import Any, Callable, Protocol
 
 from ai_news.config import Settings, settings as default_settings
 from ai_news.guardrails import redact_pii
@@ -27,66 +25,193 @@ from ai_news.text import tokenize
 
 log = logging.getLogger(__name__)
 
-_CLIENT: Any = None
 _START_WITH_RE = re.compile(r"\*\*Start with\*\*\s*\[(\d+)\]", re.I)
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
+# ------------------------------------------------------------------ Provider-agnostic protocols
+class TraceHandle(Protocol):
+    def record_span(self, name: str, output: dict) -> None: ...
+    def record_score(self, name: str, value: float, comment: str = "") -> None: ...
+    def finish(self, output: dict) -> None: ...
+
+
+class ObservabilityBackend(Protocol):
+    def start_trace(self, name: str, *, input: dict, metadata: dict | None = None,
+                    tags: list[str] | None = None) -> TraceHandle | None: ...
+    def langchain_callbacks(self) -> list[Any]: ...
+    def flush(self) -> None: ...
+
+
+# ------------------------------------------------------------------ Optional Langfuse backend
+_LANGFUSE_CLIENT: Any = None
+
+
 def _reset_client_after_fork() -> None:
     """Clear any inherited Langfuse client in a ZeroGPU forked child process."""
-    global _CLIENT
-    _CLIENT = None
+    global _LANGFUSE_CLIENT
+    _LANGFUSE_CLIENT = None
 
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_client_after_fork)
 
 
-def is_enabled(cfg: Settings | None = None) -> bool:
-    cfg = cfg or default_settings
-    return bool(cfg.langfuse_enabled and cfg.langfuse_public_key and cfg.langfuse_secret_key)
+class _LangfuseTraceHandle:
+    def __init__(self, client: Any, root: Any, trace_id: str | None):
+        self._client = client
+        self._root = root
+        self._trace_id = trace_id
 
-
-def get_client(cfg: Settings | None = None) -> Any | None:
-    """Lazily initialize and return a Langfuse client, or None if disabled/unavailable."""
-    global _CLIENT
-    cfg = cfg or default_settings
-    if not is_enabled(cfg):
-        return None
-    if _CLIENT is not None:
-        return _CLIENT
-    try:
-        from langfuse import Langfuse
-        _CLIENT = Langfuse(
-            public_key=cfg.langfuse_public_key,
-            secret_key=cfg.langfuse_secret_key,
-            host=cfg.langfuse_host,
-        )
-        return _CLIENT
-    except Exception as e:
-        log.warning("Langfuse unavailable: %s", e)
-        return None
-
-
-def _make_langchain_handler(cfg: Settings) -> Any | None:
-    """Build a Langfuse LangChain CallbackHandler (supports v3 and v2 imports)."""
-    try:
-        from langfuse.langchain import CallbackHandler
+    def record_span(self, name: str, output: dict) -> None:
         try:
-            return CallbackHandler(public_key=cfg.langfuse_public_key)
-        except TypeError:
-            return CallbackHandler()
-    except Exception:
+            if hasattr(self._root, "start_span"):
+                sp = self._root.start_span(name=name, output=output)
+                sp.end()
+            elif hasattr(self._root, "span"):
+                sp = self._root.span(name=name, output=output)
+                if hasattr(sp, "end"):
+                    sp.end()
+        except Exception as e:
+            log.debug("Langfuse span failed for %s: %s", name, e)
+
+    def record_score(self, name: str, value: float, comment: str = "") -> None:
         try:
-            from langfuse.callback import CallbackHandler
-            return CallbackHandler(
+            if self._client and hasattr(self._client, "create_score") and self._trace_id:
+                self._client.create_score(trace_id=self._trace_id, name=name, value=value, comment=comment)
+            elif hasattr(self._root, "score"):
+                self._root.score(name=name, value=value, comment=comment)
+        except Exception as e:
+            log.debug("Langfuse score failed for %s: %s", name, e)
+
+    def finish(self, output: dict) -> None:
+        try:
+            if hasattr(self._root, "update"):
+                self._root.update(output=output)
+            if hasattr(self._root, "end"):
+                self._root.end()
+        except Exception as e:
+            log.debug("Langfuse trace finish failed: %s", e)
+
+
+class LangfuseBackend:
+    """Optional Langfuse adapter (supports SDK v3 and v2). Never imported unless configured."""
+
+    def __init__(self, cfg: Settings, client: Any | None = None):
+        self.cfg = cfg
+        self._client = client if client is not None else self._init_client(cfg)
+
+    @staticmethod
+    def _init_client(cfg: Settings) -> Any | None:
+        global _LANGFUSE_CLIENT
+        if _LANGFUSE_CLIENT is not None:
+            return _LANGFUSE_CLIENT
+        try:
+            from langfuse import Langfuse
+            _LANGFUSE_CLIENT = Langfuse(
                 public_key=cfg.langfuse_public_key,
                 secret_key=cfg.langfuse_secret_key,
                 host=cfg.langfuse_host,
             )
+            return _LANGFUSE_CLIENT
         except Exception as e:
-            log.debug("Langfuse LangChain CallbackHandler unavailable: %s", e)
+            log.warning("Langfuse backend requested but unavailable (%s); skipping observability", e)
             return None
+
+    @property
+    def ready(self) -> bool:
+        return self._client is not None
+
+    def start_trace(self, name: str, *, input: dict, metadata: dict | None = None,
+                    tags: list[str] | None = None) -> TraceHandle | None:
+        if not self._client:
+            return None
+        try:
+            if hasattr(self._client, "start_span"):
+                root = self._client.start_span(name=name, input=input, metadata=metadata)
+                return _LangfuseTraceHandle(self._client, root, getattr(root, "trace_id", None))
+            if hasattr(self._client, "trace"):
+                root = self._client.trace(name=name, input=input, metadata=metadata, tags=tags or [])
+                return _LangfuseTraceHandle(self._client, root, getattr(root, "id", None))
+        except Exception as e:
+            log.warning("Langfuse trace start failed: %s", e)
+        return None
+
+    def langchain_callbacks(self) -> list[Any]:
+        if not self._client:
+            return []
+        try:
+            from langfuse.langchain import CallbackHandler
+            try:
+                return [CallbackHandler(public_key=self.cfg.langfuse_public_key)]
+            except TypeError:
+                return [CallbackHandler()]
+        except Exception:
+            try:
+                from langfuse.callback import CallbackHandler
+                return [CallbackHandler(
+                    public_key=self.cfg.langfuse_public_key,
+                    secret_key=self.cfg.langfuse_secret_key,
+                    host=self.cfg.langfuse_host,
+                )]
+            except Exception as e:
+                log.debug("Langfuse LangChain CallbackHandler unavailable: %s", e)
+                return []
+
+    def flush(self) -> None:
+        if self._client:
+            try:
+                self._client.flush()
+            except Exception as e:
+                log.debug("Langfuse flush failed: %s", e)
+
+
+# ------------------------------------------------------------------ Backend registry & selection
+BackendFactory = Callable[[Settings], ObservabilityBackend | None]
+_BACKENDS: dict[str, BackendFactory] = {}
+
+
+def register_backend(name: str, factory: BackendFactory) -> None:
+    """Register a custom observability backend factory under `name`."""
+    _BACKENDS[name.strip().lower()] = factory
+
+
+def unregister_backend(name: str) -> None:
+    _BACKENDS.pop(name.strip().lower(), None)
+
+
+def _langfuse_configured(cfg: Settings) -> bool:
+    return bool(cfg.langfuse_enabled and cfg.langfuse_public_key and cfg.langfuse_secret_key)
+
+
+def is_enabled(cfg: Settings | None = None) -> bool:
+    """Return True only when an observability backend is explicitly active and configured."""
+    cfg = cfg or default_settings
+    mode = (cfg.observability_backend or "auto").strip().lower()
+    if mode in {"none", "off", "false", "0", ""}:
+        return False
+    if mode in _BACKENDS:
+        return True
+    if mode in {"auto", "langfuse"}:
+        return _langfuse_configured(cfg)
+    return False
+
+
+def get_backend(cfg: Settings | None = None) -> ObservabilityBackend | None:
+    """Return the active ObservabilityBackend, or None to skip all tracing/observability."""
+    cfg = cfg or default_settings
+    mode = (cfg.observability_backend or "auto").strip().lower()
+    if mode in {"none", "off", "false", "0", ""}:
+        return None
+    if mode in _BACKENDS:
+        return _BACKENDS[mode](cfg)
+    if mode in {"auto", "langfuse"}:
+        if not _langfuse_configured(cfg):
+            return None
+        backend = LangfuseBackend(cfg)
+        return backend if backend.ready else None
+    log.warning("Unknown OBSERVABILITY_BACKEND=%r; skipping observability", mode)
+    return None
 
 
 # ------------------------------------------------------------------ Automated evaluation metrics
@@ -106,7 +231,7 @@ def _lexical_grounding(answer: str, used_refs: list[dict]) -> float:
 def compute_rag_scores(state: dict) -> dict[str, tuple[float, str]]:
     """Compute retrieval-quality, answer-quality, and guardrail scores from final GraphState.
 
-    Returns `{score_name: (numeric_value, short_comment)}`.
+    Provider-agnostic: returns `{score_name: (numeric_value, short_comment)}`.
     """
     scores: dict[str, tuple[float, str]] = {}
 
@@ -263,9 +388,13 @@ def summarize_node_object(node: str, delta: dict) -> dict:
     return {"keys": sorted(delta.keys())}
 
 
-# ------------------------------------------------------------------ RagTracer context manager
+# ------------------------------------------------------------------ Provider-agnostic RagTracer
 class RagTracer:
-    """Context manager that traces one RAG run in Langfuse and posts retrieval/answer scores."""
+    """Context manager that traces one RAG run via the active ObservabilityBackend.
+
+    When no backend is configured (e.g. Langfuse env vars are missing), every method is a
+    zero-overhead no-op.
+    """
 
     def __init__(
         self,
@@ -275,25 +404,29 @@ class RagTracer:
         filters: dict | None = None,
         history_len: int = 0,
         cfg: Settings | None = None,
+        backend: ObservabilityBackend | None = None,
         client: Any | None = None,
     ):
         self.cfg = cfg or default_settings
-        # Always redact PII before anything touches Langfuse
-        self.redacted_question = redact_pii(question).text
+        self._question = question
         self.corpus_size = corpus_size
         self.filters = filters or {}
         self.history_len = history_len
-        self._client = client if client is not None else get_client(self.cfg)
-        self._root: Any = None
-        self._trace_id: str | None = None
-        self._lc_handler: Any = None
+        if backend is not None:
+            self._backend: ObservabilityBackend | None = backend
+        elif client is not None:
+            self._backend = LangfuseBackend(self.cfg, client=client)
+        else:
+            self._backend = get_backend(self.cfg)
+        self._handle: TraceHandle | None = None
+        self._callbacks: list[Any] = []
 
     @property
     def active(self) -> bool:
-        return self._client is not None
+        return self._backend is not None
 
     def __enter__(self) -> "RagTracer":
-        if not self._client:
+        if self._backend is None:
             return self
         meta = {
             "corpus_size": self.corpus_size,
@@ -302,79 +435,48 @@ class RagTracer:
             "llm_model_id": self.cfg.llm_model_id,
             "embed_model_id": self.cfg.embed_model_id,
             "rerank_model_id": self.cfg.rerank_model_id,
+            "rerank_stage2_model_id": self.cfg.rerank_stage2_model_id,
             "pii_mode": self.cfg.guardrails_pii_mode,
         }
-        inp = {"question": self.redacted_question, "filters": self.filters}
-        try:
-            if hasattr(self._client, "start_span"):
-                self._root = self._client.start_span(name="rag_assistant", input=inp, metadata=meta)
-                self._trace_id = getattr(self._root, "trace_id", None)
-            elif hasattr(self._client, "trace"):
-                self._root = self._client.trace(name="rag_assistant", input=inp, metadata=meta, tags=["rag"])
-                self._trace_id = getattr(self._root, "id", None)
-            self._lc_handler = _make_langchain_handler(self.cfg)
-        except Exception as e:
-            log.warning("Langfuse trace start failed: %s", e)
-            self._root = None
+        inp = {"question": redact_pii(self._question).text, "filters": self.filters}
+        self._handle = self._backend.start_trace("rag_assistant", input=inp, metadata=meta, tags=["rag"])
+        if self._handle is not None:
+            self._callbacks = self._backend.langchain_callbacks()
         return self
 
     def langchain_callbacks(self) -> list[Any]:
-        return [self._lc_handler] if self._lc_handler is not None else []
+        return list(self._callbacks)
 
     def record_node(self, node: str, delta: dict) -> None:
-        if not self._root:
+        if self._handle is None:
             return
-        payload = summarize_node_object(node, delta)
-        try:
-            if hasattr(self._root, "start_span"):
-                sp = self._root.start_span(name=f"node:{node}", output=payload)
-                sp.end()
-            elif hasattr(self._root, "span"):
-                sp = self._root.span(name=f"node:{node}", output=payload)
-                if hasattr(sp, "end"):
-                    sp.end()
-        except Exception as e:
-            log.debug("Langfuse span failed for %s: %s", node, e)
+        self._handle.record_span(f"node:{node}", summarize_node_object(node, delta))
 
     def finish(self, final_state: dict, error: str | None = None) -> dict[str, tuple[float, str]]:
+        if self._handle is None:
+            return {}
         scores = {} if error else compute_rag_scores(final_state)
-        if not self._root:
-            return scores
-        try:
-            out = (
-                {"error": error}
-                if error
-                else {
-                    "answer": redact_pii(str(final_state.get("answer") or "")).text,
-                    "references_count": len(final_state.get("references") or []),
-                    "summarized": final_state.get("summarized", 0),
-                    "guardrail_blocked": bool(final_state.get("guardrail_blocked")),
-                }
-            )
-            if hasattr(self._root, "update"):
-                self._root.update(output=out)
-            if hasattr(self._root, "end"):
-                self._root.end()
-            for name, (val, comment) in scores.items():
-                self._post_score(name, val, comment)
-        except Exception as e:
-            log.warning("Langfuse finish/score failed: %s", e)
+        out = (
+            {"error": error}
+            if error
+            else {
+                "answer": redact_pii(str(final_state.get("answer") or "")).text,
+                "references_count": len(final_state.get("references") or []),
+                "summarized": final_state.get("summarized", 0),
+                "guardrail_blocked": bool(final_state.get("guardrail_blocked")),
+            }
+        )
+        self._handle.finish(out)
+        for name, (val, comment) in scores.items():
+            self._handle.record_score(name, val, comment)
         return scores
 
-    def _post_score(self, name: str, value: float, comment: str) -> None:
-        if self._client and hasattr(self._client, "create_score") and self._trace_id:
-            self._client.create_score(trace_id=self._trace_id, name=name, value=value, comment=comment)
-        elif self._root and hasattr(self._root, "score"):
-            self._root.score(name=name, value=value, comment=comment)
-
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._client:
-            try:
-                if exc is not None and self._root is not None:
-                    self.finish({}, error=f"{exc_type.__name__}: {exc}")
-                self._client.flush()
-            except Exception as e:
-                log.debug("Langfuse flush failed: %s", e)
+        if self._backend is None:
+            return
+        if exc is not None and self._handle is not None:
+            self.finish({}, error=f"{exc_type.__name__}: {exc}")
+        self._backend.flush()
 
 
 def trace_polish_run(
@@ -385,35 +487,25 @@ def trace_polish_run(
     blocked: bool = False,
     pii_detected: bool = False,
     cfg: Settings | None = None,
+    backend: ObservabilityBackend | None = None,
     client: Any | None = None,
 ) -> None:
-    """Record and flush a single Langfuse trace for the Post tab's AI rewrite."""
-    c = client if client is not None else get_client(cfg)
-    if not c:
+    """Record and flush a single trace for the Post tab's AI rewrite; no-op when unconfigured."""
+    if backend is None:
+        backend = LangfuseBackend(cfg or default_settings, client=client) if client is not None else get_backend(cfg)
+    if backend is None:
         return
-    try:
-        inp = {"draft_chars": len(draft), "draft_preview": redact_pii(draft[:400]).text}
-        out = {"result_chars": len(result_text), "note": note, "blocked": blocked}
-        trace_id = None
-        root = None
-        if hasattr(c, "start_span"):
-            root = c.start_span(name="polish_post", input=inp, output=out)
-            trace_id = getattr(root, "trace_id", None)
-            root.end()
-        elif hasattr(c, "trace"):
-            root = c.trace(name="polish_post", input=inp, output=out, tags=["post"])
-            trace_id = getattr(root, "id", None)
-
-        kept_links = 0.0 if ("dropped some links" in note or "empty" in note or blocked) else 1.0
-        for name, val in (
-            ("polish_guardrail_passed", 0.0 if blocked else 1.0),
-            ("polish_pii_detected", 1.0 if pii_detected else 0.0),
-            ("polish_links_preserved", kept_links),
-        ):
-            if hasattr(c, "create_score") and trace_id:
-                c.create_score(trace_id=trace_id, name=name, value=val)
-            elif root and hasattr(root, "score"):
-                root.score(name=name, value=val)
-        c.flush()
-    except Exception as e:
-        log.debug("Langfuse polish trace failed: %s", e)
+    inp = {"draft_chars": len(draft), "draft_preview": redact_pii(draft[:400]).text}
+    out = {"result_chars": len(result_text), "note": note, "blocked": blocked}
+    handle = backend.start_trace("polish_post", input=inp, tags=["post"])
+    if handle is None:
+        return
+    handle.finish(out)
+    kept_links = 0.0 if ("dropped some links" in note or "empty" in note or blocked) else 1.0
+    for name, val in (
+        ("polish_guardrail_passed", 0.0 if blocked else 1.0),
+        ("polish_pii_detected", 1.0 if pii_detected else 0.0),
+        ("polish_links_preserved", kept_links),
+    ):
+        handle.record_score(name, val)
+    backend.flush()

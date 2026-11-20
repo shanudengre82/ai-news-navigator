@@ -15,7 +15,7 @@ import logging  # noqa: E402
 from ai_news.config import settings  # noqa: E402
 from ai_news.fetchers import arxiv, load_sources  # noqa: E402
 from ai_news.ingest import refresh, sync_from_hub  # noqa: E402
-from ai_news.llm import Reranker, load_chat_model, load_embeddings  # noqa: E402
+from ai_news.llm import TwoStageReranker, load_chat_model, load_embeddings  # noqa: E402
 from ai_news.rag.graph import build_graph  # noqa: E402
 from ai_news.rag.nodes import RagNodes  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
@@ -38,7 +38,13 @@ store.load()
 
 # ---- models: loaded once at import; ZeroGPU streams them to the GPU on the first @spaces.GPU call ----
 llm = load_chat_model(settings.llm_backend, settings.llm_model_id, settings.llm_max_new_tokens, settings.hf_token)
-reranker = Reranker(settings.rerank_model_id)
+reranker = TwoStageReranker(
+    stage1_model_id=settings.rerank_model_id,
+    stage2_model_id=settings.rerank_stage2_model_id,
+    stage1_top_k=settings.rerank_stage1_top_k,
+    stage2_weight=settings.rerank_stage2_weight,
+    mmr_lambda=settings.rerank_mmr_lambda,
+)
 graph = build_graph(RagNodes(
     llm, store, reranker, live_search=arxiv.search,
     guardrails_enabled=settings.guardrails_enabled,

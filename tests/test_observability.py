@@ -1,13 +1,15 @@
-from dataclasses import dataclass, field
+import sys
 
 from ai_news.config import Settings
 from ai_news.observability import (
     RagTracer,
     _reset_client_after_fork,
     compute_rag_scores,
+    get_backend,
     is_enabled,
-    summarize_node_object,
+    register_backend,
     trace_polish_run,
+    unregister_backend,
 )
 
 
@@ -54,20 +56,79 @@ class FakeLangfuse:
         self.flushed += 1
 
 
-def test_is_enabled_respects_keys_and_flag():
-    assert not is_enabled(Settings(langfuse_public_key=None, langfuse_secret_key=None, langfuse_enabled=True))
-    assert not is_enabled(Settings(langfuse_public_key="pk", langfuse_secret_key="sk", langfuse_enabled=False))
-    assert is_enabled(Settings(langfuse_public_key="pk", langfuse_secret_key="sk", langfuse_enabled=True))
+def test_missing_langfuse_vars_skips_observability_completely(monkeypatch):
+    # Even if langfuse is not installed/importable, missing env vars must skip it cleanly
+    monkeypatch.setitem(sys.modules, "langfuse", None)
+    cfg = Settings(
+        observability_backend="auto",
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
+        langfuse_enabled=True,
+    )
+    assert not is_enabled(cfg)
+    assert get_backend(cfg) is None
 
-
-def test_rag_tracer_noop_when_unconfigured():
-    cfg = Settings(langfuse_public_key=None, langfuse_secret_key=None, langfuse_enabled=False)
     with RagTracer("test question", cfg=cfg) as tracer:
         assert not tracer.active
         assert tracer.langchain_callbacks() == []
         tracer.record_node("retrieve", {"candidates": []})
-        scores = tracer.finish({"guardrail_blocked": False, "answer": "ok"})
-    assert scores["guardrail_passed"][0] == 1.0
+        # Skipped completely -> returns empty dict without computing scores
+        assert tracer.finish({"guardrail_blocked": False, "answer": "ok"}) == {}
+
+    trace_polish_run("draft", "polished", "", cfg=cfg)  # pure no-op
+
+
+def test_observability_backend_none_skips_even_when_langfuse_keys_present():
+    cfg = Settings(
+        observability_backend="none",
+        langfuse_public_key="pk-lf-test",
+        langfuse_secret_key="sk-lf-test",
+        langfuse_enabled=True,
+    )
+    assert not is_enabled(cfg)
+    assert get_backend(cfg) is None
+    with RagTracer("test", cfg=cfg) as tracer:
+        assert not tracer.active
+
+
+def test_custom_non_langfuse_backend_pluggable():
+    events: list[tuple] = []
+
+    class CustomHandle:
+        def record_span(self, name, output):
+            events.append(("span", name, output))
+
+        def record_score(self, name, value, comment=""):
+            events.append(("score", name, value))
+
+        def finish(self, output):
+            events.append(("finish", output))
+
+    class CustomBackend:
+        def start_trace(self, name, *, input, metadata=None, tags=None):
+            events.append(("start", name, input))
+            return CustomHandle()
+
+        def langchain_callbacks(self):
+            return []
+
+        def flush(self):
+            events.append(("flush",))
+
+    register_backend("custom_test", lambda _cfg: CustomBackend())
+    try:
+        cfg = Settings(observability_backend="custom_test")
+        assert is_enabled(cfg)
+        with RagTracer("What is speculative decoding?", cfg=cfg) as tr:
+            assert tr.active
+            tr.record_node("retrieve", {"candidates": []})
+            tr.finish({"guardrail_blocked": False, "answer": "Fast decoding [1]."})
+        assert events[0][0] == "start" and events[0][1] == "rag_assistant"
+        assert any(e[0] == "span" and e[1] == "node:retrieve" for e in events)
+        assert any(e[0] == "score" and e[1] == "guardrail_passed" for e in events)
+        assert events[-1] == ("flush",)
+    finally:
+        unregister_backend("custom_test")
 
 
 def test_rag_tracer_records_redacted_objects_scores_and_flushes():
@@ -146,4 +207,4 @@ def test_trace_polish_run_and_fork_reset():
         "polish_pii_detected": 1.0,
         "polish_links_preserved": 1.0,
     }
-    _reset_client_after_fork()  # should execute cleanly without error
+    _reset_client_after_fork()

@@ -40,20 +40,7 @@ def load_chat_model(backend: str, model_id: str, max_new_tokens: int = 900, hf_t
     return ChatHuggingFace(llm=HuggingFacePipeline(pipeline=pipe), tokenizer=tokenizer, model_id=model_id)
 
 
-class Reranker:
-    """Cross-encoder reranker (BAAI/bge-reranker-base)."""
-
-    def __init__(self, model_id: str, device: str | None = None):
-        from sentence_transformers import CrossEncoder
-        self.model = CrossEncoder(model_id, device=device or _device(), max_length=512)
-
-    def score(self, query: str, passages: list[str]) -> list[float]:
-        """Relevance probabilities in [0, 1]."""
-        import torch
-        if not passages:
-            return []
-        return [float(s) for s in self.model.predict([(query, p) for p in passages], batch_size=16,
-                                                     activation_fn=torch.nn.Sigmoid())]
+from ai_news.reranker import CrossEncoderScorer, Reranker, TwoStageReranker  # noqa: F401
 
 
 def load_embeddings(model_id: str):

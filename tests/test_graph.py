@@ -126,3 +126,21 @@ def test_input_guardrail_redacts_pii_and_output_guardrail_strips_bad_citations(s
     assert "leak@example.com" not in out["answer"]
     assert out["output_guardrail"]["invalid_citations"] == [99]
     assert out["output_guardrail"]["pii_redacted"] is True
+
+
+def test_two_stage_reranker_integrates_with_graph(store):
+    from ai_news.reranker import TwoStageReranker
+
+    class S1:
+        def score(self, query, passages):
+            return [0.6 if p.startswith("Efficient") else 0.5 if p.startswith("Test-time") else 0.1 for p in passages]
+
+    class S2:
+        def score(self, query, passages):
+            return [0.95 if p.startswith("Test-time") else 0.2 for p in passages]
+
+    rr = TwoStageReranker(stage1_scorer=S1(), stage2_scorer=S2(), stage1_top_k=3, stage2_weight=0.75, mmr_lambda=0.85)
+    llm = FakeListChatModel(responses=[analyze(["compute", "reasoning"]), grade(5, {1}), "Answer [1]."])
+    out = build_graph(RagNodes(llm, store, reranker=rr)).invoke({"question": "test-time compute"})
+    assert out["references"][0]["title"].startswith("Test-time")
+    assert any("two-stage cross-encoder" in t and "MMR diversity" in t for t in out["trace"])

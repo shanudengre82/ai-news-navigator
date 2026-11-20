@@ -38,7 +38,7 @@ flowchart TD
         IG -->|"Allowed (PII Redacted)"| Analyze["analyze_query (LLM JSON: intent, queries, filters)"]
         Analyze --> Retrieve["retrieve (BM25 + FAISS -> RRF Top 300)"]
         Store -.-> Retrieve
-        Retrieve --> Rerank["rerank (bge-reranker-base x recency/upvotes)"]
+        Retrieve --> Rerank["rerank (Stage 1 bge-reranker-base -> Stage 2 bge-reranker-v2-m3 -> MMR Diversity)"]
         Rerank --> Sanitize["Sanitize Retrieved Abstracts (Indirect Injection Defense)"]
         Sanitize --> Grade["grade_documents (LLM Judge + Digests)"]
         Grade -->|"Few relevant (retry 0)"| Rewrite["rewrite_query (LLM)"]
@@ -57,8 +57,8 @@ flowchart TD
         P_LLM --> P_OG["Output PII + Link Preservation Check"]
     end
 
-    subgraph Obs["5. Langfuse Observability & Evaluation (PII-Redacted, Fork-Safe)"]
-        LF_Trace["Root Trace + LangChain CallbackHandler"]
+    subgraph Obs["5. Provider-Agnostic Observability & Evaluation (Optional, Skipped When Unconfigured)"]
+        LF_Trace["ObservabilityBackend (e.g. optional Langfuse or custom)"]
         LF_Spans["Structured Spans: Guardrails, Retrieve, Rerank, Grade"]
         LF_Scores["Automated Scores: Retrieval Quality & Answer Quality"]
         LF_Trace --> LF_Spans --> LF_Scores
@@ -141,7 +141,7 @@ first, then the newest). It is rebuilt only when the collection changes and take
 |---|---|---|---|
 | **Qwen2.5-7B-Instruct** | A 7-billion-parameter open chat LLM from Alibaba's Qwen team | The "brain" of the assistant: it plans the searches, judges relevance, rewords searches and writes the cited answer. It returns structured JSON for the planning and judging steps. You can switch it with `LLM_MODEL_ID`, for example to Qwen2.5-3B on smaller GPUs. | `ai_news/llm.py`, `ai_news/rag/prompts.py` |
 | **BAAI/bge-small-en-v1.5** | A small (33M parameter) embedding model that turns text into 384-number vectors | Embeds every title + abstract, and every search query, for meaning-based search. It is small enough to run on CPU, so the background collection needs no GPU. Queries get BGE's recommended retrieval prefix. | `ai_news/llm.py` (`load_embeddings`) |
-| **BAAI/bge-reranker-base** | A cross-encoder that scores how well a passage answers a query | Scores every candidate in the pool by actually reading the question and each abstract together. This is more accurate than comparing vectors; everything above the relevance threshold becomes a match. | `ai_news/llm.py` (`Reranker`) |
+| **BAAI/bge-reranker-base** + **BAAI/bge-reranker-v2-m3** | Two-stage Sentence-Transformers cross-encoder re-reranker + MMR diversity | Stage 1 (`bge-reranker-base`) scores the full RRF pool quickly; Stage 2 (`bge-reranker-v2-m3`, `max_length=1024`) re-reranks the top 40 candidates using the question and extracted intent; Stage 3 applies Maximal Marginal Relevance (MMR) over stored BGE embeddings so the top results are diverse and non-redundant. Stage 2 can be disabled via `RERANK_STAGE2_MODEL_ID=""`. | `ai_news/reranker.py`, `ai_news/rag/nodes.py` |
 | **Transformers** | Hugging Face's library for loading and running models | Loads Qwen and its tokenizer and runs text generation. | `ai_news/llm.py` |
 | **Accelerate** | Hugging Face's helper for placing models on devices | Used by transformers to load the large model efficiently onto the GPU. | (used by transformers) |
 | **PyTorch** (`torch`) | The deep-learning framework all three models run on | Runs the neural networks, on the GPU in the Space and on CPU for the embeddings. | (used by all models) |
@@ -185,7 +185,7 @@ first, then the newest). It is rebuilt only when the collection changes and take
 | Component | What it is | What it does in this project | Where |
 |---|---|---|---|
 | **Guardrails & PII checker** | Our own deterministic, dependency-free safety layer | Runs on every Ask and Post-rewrite boundary. Detects and redacts PII/secrets (emails, phone numbers, SSNs, Luhn-validated credit cards, IPv4s, API keys/JWTs) before text reaches the LLM or traces; blocks prompt-injection overrides and unsafe requests while allowing AI-safety research queries; sanitizes scraped abstracts against indirect prompt injection; and validates inline `[n]` citations and URLs on output. | `ai_news/guardrails.py`, `ai_news/rag/nodes.py`, `app.py` |
-| **Langfuse** (`langfuse`) | Open-source LLM observability and evaluation platform | Optional, fork-safe tracing for the RAG graph and post rewriter. Captures LangChain/LangGraph generations plus structured snapshots of retrieved candidates, reranker score distributions, LLM judge verdicts and guardrail outcomes (always PII-redacted), and posts automated retrieval-quality and answer-quality scores (`retrieval_*`, `answer_*`, `guardrail_*`) to every trace. | `ai_news/observability.py`, `ai_news/assistant.py`, `app.py` |
+| **Provider-agnostic observability** (optional **Langfuse**) | Pluggable tracing and RAG evaluation interface (`ObservabilityBackend`) | Completely skipped with zero overhead or imports when unconfigured (e.g. when `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` are missing or `OBSERVABILITY_BACKEND=none`). When enabled (optional `pip install "langfuse>=3.0"` or a custom registered backend), captures PII-redacted node snapshots, LangChain generations, and automated retrieval/answer quality scores (`retrieval_*`, `answer_*`, `guardrail_*`). | `ai_news/observability.py`, `ai_news/assistant.py`, `app.py` |
 
 ### Quality checks
 
