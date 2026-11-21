@@ -8,6 +8,7 @@ Teal means "kept", ochre means "filtered out"; no other accent colors.
 from __future__ import annotations
 
 import html
+import json
 import math
 import os
 import re
@@ -121,11 +122,27 @@ MAP_JS = r"""
   const say = t => { msg.textContent = t; msg.hidden = !t; };
   const meta = p => [p.s, p.d].concat(p.v ? [p.v + (p.v === 1 ? ' upvote' : ' upvotes')] : []).map(esc).join(', ');
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  for (let i = 0; i < 40 && typeof ForceGraph3D === 'undefined'; i++) await new Promise(r => setTimeout(r, 150));
   if (typeof ForceGraph3D === 'undefined') return say('The map library could not be loaded. Check your connection and reload.');
   const probe = document.createElement('canvas');
   if (!(probe.getContext('webgl2') || probe.getContext('webgl'))) return say('This browser has WebGL turned off, so the 3D map cannot be shown.');
-  let data;
-  try { data = await server.map_data(); } catch (e) { console.error(e); return say('The map could not be loaded. Reload the page to try again.'); }
+  const readDomData = () => {
+    const el = document.querySelector('.nv-map-json');
+    if (!el || !el.value) return null;
+    try { return JSON.parse(el.value); } catch (e) { console.error(e); return null; }
+  };
+  let data = readDomData();
+  if (!data) {
+    data = await new Promise(resolve => {
+      const done = v => { obs.disconnect(); clearTimeout(timer); resolve(v); };
+      const obs = new MutationObserver(() => { const d = readDomData(); if (d) done(d); });
+      obs.observe(document.querySelector('.nv-landing') || document.body, {childList: true, subtree: true});
+      const timer = setTimeout(() => done(readDomData()), 12000);
+    });
+  }
+  if (!data && typeof server !== 'undefined' && server.map_data) {
+    try { data = await server.map_data(); } catch (e) { console.error(e); }
+  }
   if (!data) return say('The map could not be loaded. Reload the page to try again.');
   const T = data.topics || [], P = data.papers || [];
   if (!P.length) return say('The map appears once the collection has papers.');
@@ -343,6 +360,72 @@ MAP_JS = r"""
                                          {attributes: true, attributeFilter: ['class', 'data-nv-theme']});
 })();
 """
+
+MERMAID_HEAD = '<script src="https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js"></script>'
+MERMAID_JS = r"""
+(() => {
+  const root = element.querySelector('.nv-mermaid');
+  if (!root || root.dataset.wired) return;
+  root.dataset.wired = '1';
+  const srcEl = root.querySelector('.nv-mermaid-src');
+  const out = root.querySelector('.nv-mermaid-svg');
+  const src = srcEl ? srcEl.value.trim() : '';
+  if (!src || !out) return;
+  let lastTheme = null;
+  let seq = 0;
+  const render = async () => {
+    if (!root.offsetParent) return;  // wait until the About tab is visible so SVG bounding boxes are non-zero
+    for (let i = 0; i < 40 && typeof mermaid === 'undefined'; i++) await new Promise(r => setTimeout(r, 150));
+    if (typeof mermaid === 'undefined') return;  // keeps the readable <pre> fallback visible
+    const dark = document.documentElement.classList.contains('dark') || document.body.classList.contains('dark');
+    const th = dark ? 'dark' : 'default';
+    if (th === lastTheme && out.querySelector('svg')) return;
+    lastTheme = th;
+    try {
+      mermaid.initialize({startOnLoad: false, theme: th, securityLevel: 'loose', flowchart: {useMaxWidth: true}});
+      const {svg} = await mermaid.render('nv-mmd-' + (++seq) + '-' + Math.random().toString(36).slice(2, 7), src);
+      out.innerHTML = svg;
+    } catch (e) {
+      console.error('Mermaid render failed:', e);
+    }
+  };
+  new IntersectionObserver(([e]) => { if (e.isIntersecting) render(); }).observe(root);
+  new MutationObserver(() => render()).observe(document.documentElement, {attributes: true, attributeFilter: ['class', 'data-nv-theme']});
+  new MutationObserver(() => render()).observe(document.body, {attributes: true, attributeFilter: ['class']});
+  render();
+})();
+"""
+_MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.S)
+
+
+def split_about_mermaid(md: str) -> list[tuple[str, str]]:
+    """Split markdown into ('md', ...) and ('mermaid', ...) segments so Gradio can render Mermaid as SVG."""
+    parts: list[tuple[str, str]] = []
+    pos = 0
+    for m in _MERMAID_BLOCK_RE.finditer(md):
+        before = md[pos:m.start()].strip()
+        if before:
+            parts.append(("md", before))
+        parts.append(("mermaid", m.group(1).strip()))
+        pos = m.end()
+    tail = md[pos:].strip()
+    if tail:
+        parts.append(("md", tail))
+    return parts
+
+
+def mermaid_html(diagram: str) -> str:
+    esc = html.escape(diagram)
+    return (f'<div class="nv-mermaid" style="overflow-x:auto;padding:12px 0;">'
+            f'<textarea class="nv-mermaid-src" hidden aria-hidden="true">{esc}</textarea>'
+            f'<div class="nv-mermaid-svg"><pre style="font-size:12px;overflow-x:auto;">{esc}</pre></div></div>')
+
+
+def map_payload_html(data: dict) -> str:
+    """Embed the research map JSON in a hidden textarea delivered by demo.load (private, never in initial config)."""
+    payload = html.escape(json.dumps(data, separators=(",", ":")))
+    return f'<textarea class="nv-map-json" hidden aria-hidden="true">{payload}</textarea>'
+
 
 # ---------------------------------------------------------------- colour: topics and themes
 # The map's fields (groups of related topics, largest first) get these categorical hues in this fixed order,
@@ -1367,9 +1450,10 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         """The research map (topics, papers, links); fetched by the map's own script, not part of the API."""
         return research_map(store)
 
-    def landing() -> tuple[str, str, str]:
+    def landing() -> tuple[str, str, str, str]:
         s = collection_stats(store)
-        return map_intro_html(research_map(store)["topics"]), landing_html(s), trend_html(s)
+        m = research_map(store)
+        return map_intro_html(m["topics"]), landing_html(s), trend_html(s), map_payload_html(m)
 
     global _topic_lookup
     _topic_lookup = lambda url: topic_of(store).get(url)  # noqa: E731
@@ -1457,6 +1541,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                         with gr.Column(elem_classes="nv-landing"):
                             gr.HTML(MAP_HTML, head=MAP_HEAD, js_on_load=MAP_JS, server_functions=[map_data],
                                     elem_classes="nv-flush")
+                            map_payload = gr.HTML("", elem_classes="nv-flush")  # populated privately by demo.load
                             stats = gr.HTML(elem_classes="nv-flush")  # only says something while empty
                             trend = gr.HTML(elem_classes="nv-flush")  # papers-per-day strip: the map's legend
                             map_intro = gr.HTML(elem_classes="nv-flush")
@@ -1590,17 +1675,22 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 out = gr.HTML()
                 btn.click(refresh_now, None, [out, stat, masthead]).then(
                     latest_days, None, l_day, api_visibility="private").then(
-                    landing, None, [map_intro, stats, trend], api_visibility="private").then(
+                    landing, None, [map_intro, stats, trend, map_payload], api_visibility="private").then(
                     post_topic, topic_in, topic_out, api_visibility="private")
 
             with gr.Tab("About"):
-                gr.Markdown(ABOUT_MD, elem_classes="nv-about")
+                for kind, content in split_about_mermaid(ABOUT_MD):
+                    if kind == "mermaid":
+                        gr.HTML(mermaid_html(content), head=MERMAID_HEAD, js_on_load=MERMAID_JS,
+                                elem_classes=["nv-about", "nv-flush"])
+                    else:
+                        gr.Markdown(content, elem_classes="nv-about")
 
         demo.load(latest_days, None, l_day, api_visibility="private")
         demo.load(latest, l_inputs, feed, api_name="latest_feed")
         demo.load(status, None, stat, api_name="status")
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
-        demo.load(landing, None, [map_intro, stats, trend], api_visibility="private")
+        demo.load(landing, None, [map_intro, stats, trend, map_payload], api_visibility="private")
         demo.load(post_topic, topic_in, topic_out, api_visibility="private")
         demo.load(None, None, tz, js="() => new Date().getTimezoneOffset()", api_visibility="private").then(
             render_history, [hist, tz], hist_view, api_visibility="private")

@@ -40,3 +40,14 @@ def test_about_tab_is_in_the_ui(tmp_path):
                     lambda *a: None, lambda: "")
     labels = [b.label for b in demo.blocks.values() if type(b).__name__ == "Tab"]
     assert labels == ["Ask", "Search", "Latest", "Post", "Sources", "About"]
+
+
+def test_split_about_mermaid_extracts_diagram():
+    from ai_news.ui import ABOUT_MD, mermaid_html, split_about_mermaid
+
+    parts = split_about_mermaid(ABOUT_MD)
+    kinds = [k for k, _ in parts]
+    assert "mermaid" in kinds and "md" in kinds
+    diagrams = [c for k, c in parts if k == "mermaid"]
+    assert len(diagrams) == 1 and diagrams[0].startswith("flowchart TD")
+    assert 'class="nv-mermaid"' in mermaid_html(diagrams[0])

@@ -154,3 +154,15 @@ def test_theme_menu_and_css(store):
     for name in ("mono", "sunset", "ocean"):
         assert f'html[data-nv-theme="{name}"], ' in ui.CSS and f'html[data-nv-theme="{name}"] .dark' in ui.CSS
     assert "--topic-1:#2a78d6" in ui.CSS and "%(" not in ui.CSS
+
+
+def test_map_payload_html_roundtrips_json():
+    import html as _html
+    import json
+    from ai_news.ui import map_payload_html
+
+    sample = {"topics": [{"label": "a & b", "size": 2}], "papers": [{"t": "X < Y"}], "links": [[0, 1, 0.9]]}
+    out = map_payload_html(sample)
+    assert 'class="nv-map-json"' in out and "hidden" in out
+    inner = out.split(">", 1)[1].rsplit("<", 1)[0]
+    assert json.loads(_html.unescape(inner)) == sample
