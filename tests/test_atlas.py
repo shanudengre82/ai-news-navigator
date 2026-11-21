@@ -77,9 +77,15 @@ def test_research_map_papers_only_capped_and_cached(tmp_path):
     m = research_map(store, max_nodes=20)
     assert len(m["papers"]) == 20
     assert all(p["s"] == "arXiv" for p in m["papers"])
-    assert research_map(store, max_nodes=20) is m  # unchanged store: cached
+    assert (tmp_path / "atlas.json").exists()
+    assert research_map(store, max_nodes=20) is m  # cached within 7-day weekly TTL
     store.add([make_item("A brand new paper on diffusion", url="https://arxiv.org/abs/2610.99999")])
-    assert research_map(store, max_nodes=20) is not m
+    # Weekly TTL: minor additions do NOT rebuild the graph automatically
+    assert research_map(store, max_nodes=20) is m
+    # Explicit force=True or expired TTL rebuilds the graph
+    m2 = research_map(store, max_nodes=20, force=True)
+    assert m2 is not m
+    assert research_map(store, max_nodes=20, max_age_days=0) is not m2
 
 
 def test_research_map_empty_store(tmp_path):

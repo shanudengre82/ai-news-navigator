@@ -21,7 +21,9 @@ from ai_news.rag.nodes import RagNodes  # noqa: E402
 from ai_news.store import CorpusStore  # noqa: E402
 from ai_news import scheduler  # noqa: E402
 from ai_news.assistant import message_text, render, run_events  # noqa: E402
-from ai_news.guardrails import MAX_DRAFT_CHARS, check_input, check_output  # noqa: E402
+from ai_news.atlas import research_map  # noqa: E402
+from ai_news.cache import QueryCache  # noqa: E402
+from ai_news.guardrails import MAX_DRAFT_CHARS, check_input, check_output, redact_pii  # noqa: E402
 from ai_news.observability import trace_polish_run  # noqa: E402
 from ai_news.post import keep_links  # noqa: E402
 from ai_news.rag.prompts import POLISH  # noqa: E402
@@ -50,7 +52,11 @@ graph = build_graph(RagNodes(
     guardrails_enabled=settings.guardrails_enabled,
     pii_mode=settings.guardrails_pii_mode,
     max_query_chars=settings.guardrails_max_query_chars,
+    fast_analyze=settings.fast_analyze,
+    grade_top=settings.grade_top,
+    grade_skip_threshold=settings.grade_skip_threshold,
 ))
+query_cache = QueryCache(maxsize=settings.query_cache_size, ttl_seconds=settings.map_refresh_days * 86400.0)
 
 sources_cfg = load_sources(settings.sources_file)
 SOURCE_NAMES = (["arXiv"] if sources_cfg.get("arxiv", {}).get("enabled") else []) + \
@@ -60,12 +66,16 @@ SOURCE_NAMES = (["arXiv"] if sources_cfg.get("arxiv", {}).get("enabled") else []
 
 def run_refresh() -> str:
     if settings.refresh_mode == "pull":
-        return sync_from_hub(store)
-    return refresh(store, settings.sources_file, settings.lookback_days,
-                   push=settings.push_to_hub and bool(settings.hf_token))
+        msg = sync_from_hub(store)
+    else:
+        msg = refresh(store, settings.sources_file, settings.lookback_days,
+                      push=settings.push_to_hub and bool(settings.hf_token))
+    query_cache.clear()
+    research_map(store, max_age_days=settings.map_refresh_days, force=True)
+    return msg
 
 
-@spaces.GPU(duration=75)  # ZeroGPU reserves ~1.5x this from the visitor's daily quota
+@spaces.GPU(duration=45)  # ZeroGPU reserves ~1.5x this from the visitor's daily quota
 def _assistant_gpu(question: str, history_texts: list[str], filters: dict):
     """Runs in the ZeroGPU worker: yields plain dicts (picklable) and reports errors as events."""
     yield from run_events(graph, store, question, history_texts, filters)
@@ -78,6 +88,21 @@ def _guarded(events):
     except Exception as e:
         log.exception("ZeroGPU call failed")
         yield {"error": f"{type(e).__name__}: {e}"[:500]}
+
+
+def _cached_or_gpu(question: str, history_texts: list[str], filters: dict):
+    """Serve repeat single-turn queries from LRU cache without acquiring a ZeroGPU slot."""
+    can_cache = not history_texts and not redact_pii(question).had_pii
+    key = QueryCache.make_key(question, filters, corpus_tag=store.meta.get("last_refresh") or store.version)
+    if can_cache:
+        hit = query_cache.get(key)
+        if hit is not None:
+            yield hit
+            return
+    for ev in _guarded(_assistant_gpu(question, history_texts, filters)):
+        if can_cache and "answer" in ev and ev.get("references"):
+            query_cache.put(key, ev)
+        yield ev
 
 
 def research_assistant(message: str, history: list, sources: list[str], source_type: str, window: str,
@@ -104,14 +129,20 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
     # Filters narrow the list afterwards (see ui.refine), not the search: it finds everything that matches.
     view = {"sort": sort or "relevance", "source_type": source_type or "any", "window": window or "Any time",
             "sources": sources or None}
-    yield from render(_guarded(_assistant_gpu(message, history_texts, {})), history, message, view)
+    yield from render(_cached_or_gpu(message, history_texts, {}), history, message, view)
 
 
-@spaces.GPU(duration=60)
+@spaces.GPU(duration=35)
 def _polish_gpu(draft: str) -> str:
     """Runs in the ZeroGPU worker: one LLM call that rewrites the weekly post."""
     from langchain_core.messages import HumanMessage
-    return str(llm.invoke([HumanMessage(content=POLISH.format(draft=draft))]).content)
+    msg = [HumanMessage(content=POLISH.format(draft=draft))]
+    if hasattr(llm, "bind"):
+        try:
+            return str(llm.bind(max_new_tokens=550).invoke(msg).content)
+        except Exception:
+            pass
+    return str(llm.invoke(msg).content)
 
 
 def polish_post(draft: str) -> tuple[str, str]:

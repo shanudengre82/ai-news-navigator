@@ -8,8 +8,11 @@ neighbours by meaning. Everything runs on CPU from the FAISS vectors the store a
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import threading
+import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
@@ -28,8 +31,11 @@ NEIGHBOURS = 4
 NEAR_PERCENTILE = 95
 SPREAD = 300.0  # the PCA start fills roughly ±SPREAD in each axis
 FIELDS = 8  # topics are grouped into at most this many fields, one categorical colour each
+ATLAS_FILE = "atlas.json"
+DEFAULT_MAP_REFRESH_DAYS = 7.0
 
-_cache: dict[int, tuple[int, dict]] = {}
+log = logging.getLogger(__name__)
+_cache: dict[int, tuple[float, int, dict]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -173,21 +179,71 @@ def build_map(items: list[NewsItem], vectors: np.ndarray, k: int = NEIGHBOURS,
     return {"topics": topics, "papers": papers, "links": links}
 
 
-def research_map(store: CorpusStore, max_nodes: int = MAX_NODES) -> dict:
-    """The map for the store's current items, rebuilt only when the store changes."""
+def _load_disk_map(store: CorpusStore, max_age_sec: float) -> tuple[float, dict] | None:
+    path = store.data_dir / ATLAS_FILE
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        built_at = float(raw.get("built_at", 0.0))
+        if not built_at or (time.time() - built_at) >= max_age_sec:
+            return None
+        if not isinstance(raw.get("papers"), list) or not isinstance(raw.get("topics"), list):
+            return None
+        return built_at, raw
+    except Exception as e:
+        log.debug("ignoring stale/unreadable %s: %s", path, e)
+        return None
+
+
+def _save_disk_map(store: CorpusStore, data: dict) -> None:
+    try:
+        store.data_dir.mkdir(parents=True, exist_ok=True)
+        (store.data_dir / ATLAS_FILE).write_text(
+            json.dumps(data, separators=(",", ":")), encoding="utf-8"
+        )
+    except Exception as e:
+        log.debug("could not persist %s: %s", ATLAS_FILE, e)
+
+
+def research_map(
+    store: CorpusStore,
+    max_nodes: int = MAX_NODES,
+    *,
+    max_age_days: float = DEFAULT_MAP_REFRESH_DAYS,
+    force: bool = False,
+) -> dict:
+    """The 3D research map, rebuilt at most once every `max_age_days` (default 7 days) unless `force=True`.
+
+    Persisted to `atlas.json` inside `store.data_dir` so Space restarts reuse the weekly graph without
+    re-running K-Means and PCA.
+    """
     key = id(store)
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit and hit[0] == store.version:
-            return hit[1]
+    max_age_sec = max(0.0, float(max_age_days)) * 86400.0
+    now = time.time()
+    if not force and max_age_sec > 0:
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit and (now - hit[0]) < max_age_sec and (hit[2].get("papers") or not store.items):
+                return hit[2]
+        disk = _load_disk_map(store, max_age_sec)
+        if disk is not None and (disk[1].get("papers") or not store.items):
+            built_at, data = disk
+            with _cache_lock:
+                _cache[key] = (built_at, int(data.get("version", store.version)), data)
+            return data
+
     version = store.version
     with store._lock:
         items = _pick(store.all_items(), max_nodes)
         vectors = store.vectors.get([it.id for it in items]) if len(store.vectors) else None
     data = build_map(items, vectors) if vectors is not None and len(vectors) else build_map([], None)
     data["version"] = version
+    data["built_at"] = now
+    if data["papers"]:
+        _save_disk_map(store, data)
     with _cache_lock:
-        _cache[key] = (version, data)
+        _cache[key] = (now, version, data)
     return data
 
 

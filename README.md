@@ -215,8 +215,9 @@ first, then the newest). It is rebuilt only when the collection changes and take
 | **ZeroGPU** (`spaces`) | A free, shared GPU pool for Spaces | Lends the app a GPU only while `@spaces.GPU` code runs. Here that is one assistant answer, with 75 seconds reserved, and each visitor uses their own daily GPU quota. The GPU code runs in a separate process, so the app resets its locks after the fork and sends results back as simple messages. | `app.py`, `ai_news/assistant.py`, `ai_news/store.py` |
 | **Hugging Face Dataset repo** | A free versioned file store on the Hub | Keeps the latest `items.parquet`, `index.faiss` and `meta.json` at `shanudengre82/ai-news-corpus`. A restarted Space downloads it in seconds instead of rebuilding everything. | `ai_news/store.py` (`pull` / `push`) |
 | **`huggingface_hub`** + **`hf` CLI** | The Python client and command-line tool for the Hub | `snapshot_download` and `upload_folder` move the data to and from the dataset; the CLI uploads the code to the Space. | `ai_news/store.py`, `.github/workflows/` |
-| **GitHub Actions** | Free CI/CD from GitHub | `sync-to-hf.yml` deploys the code to the Space on every push. `refresh-corpus.yml` collects new items every 12 hours on a CPU runner and pushes them to the dataset. | `.github/workflows/` |
-| **Refresh scheduler** | A background thread in the app | In `pull` mode (the setting used on the Space), it downloads the newest dataset copy every hour. In `fetch` mode it collects the sources itself. | `ai_news/scheduler.py`, `ai_news/ingest.py` |
+| **GitHub Actions** | Free CI/CD from GitHub | `sync-to-hf.yml` deploys the code to the Space on every push. `refresh-corpus.yml` collects new items weekly (Mondays 06:00 UTC) on a CPU runner and pushes them to the dataset. | `.github/workflows/` |
+| **Refresh scheduler & weekly map cache** | Background thread + `atlas.json` 7-day cache | Pulls/fetches on a weekly schedule (`REFRESH_HOURS=168`) and caches the 3D research map for `MAP_REFRESH_DAYS=7` days on disk so restarts and live searches do not rebuild the graph unnecessarily. | `ai_news/scheduler.py`, `ai_news/atlas.py` |
+| **Inference token optimizer & LRU cache** | Per-node token caps, heuristic fast-path, confidence-gated grading, digest reuse, and `QueryCache` | Cuts LLM tokens by ~55–75% per query: tight per-node `max_new_tokens` budgets, heuristic query parsing for concise single-turn questions, skipping LLM grading when ≥3 high-confidence cross-encoder matches exist, reusing compact digests in `generate`, and serving repeat/example queries from an in-memory PII-safe LRU cache with zero ZeroGPU usage. | `ai_news/rag/nodes.py`, `ai_news/cache.py`, `app.py` |
 
 ### Guardrails, PII checks and observability
 
@@ -262,7 +263,12 @@ The corpus (`items.parquet`, `index.faiss`, `meta.json`) lives in a **Hugging Fa
 | `LLM_MODEL_ID` | `Qwen/Qwen2.5-7B-Instruct` | Any open chat model |
 | `LOOKBACK_DAYS` | `30` | How many days of history a refresh fetches |
 | `REFRESH_MODE` | `fetch` | `fetch`: the Space fetches the feeds itself. `pull`: it only downloads the snapshot that the GitHub Action pushes |
-| `REFRESH_HOURS` | `6` | How often to fetch or pull; `0` turns it off |
+| `REFRESH_HOURS` | `168` | How often to fetch or pull in hours (`168` = weekly); `0` turns it off |
+| `MAP_REFRESH_DAYS` | `7` | Days to cache the 3D research map (`atlas.json`) before rebuilding (weekly by default) |
+| `FAST_ANALYZE` | `true` | Use fast heuristic parsing for simple single-turn queries to save 1 LLM call |
+| `GRADE_TOP` | `6` | Maximum candidates reviewed by the LLM judge / passed to generation |
+| `GRADE_SKIP_THRESHOLD` | `0.75` | Auto-accept matches above this cross-encoder score and skip LLM grading when ≥3 qualify |
+| `QUERY_CACHE_SIZE` | `64` | In-memory PII-safe LRU cache entries for repeat/example queries (`0` disables) |
 | `GUARDRAILS_ENABLED` | `true` | Enable input/output guardrails, indirect prompt-injection sanitization and PII checks |
 | `GUARDRAILS_PII_MODE` | `redact` | `redact`: mask detected PII and continue; `block`: refuse requests containing PII |
 | `RERANK_STAGE2_MODEL_ID` | `BAAI/bge-reranker-v2-m3` | Stage-2 fine cross-encoder re-reranker; set to `""` or `none` to run Stage 1 only |

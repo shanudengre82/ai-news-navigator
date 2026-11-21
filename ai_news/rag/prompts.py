@@ -1,56 +1,36 @@
-"""Prompts. Small open models follow JSON instructions well when shown the exact shape."""
+"""Compact prompts tuned for small open models (low token overhead, strict JSON shapes)."""
 
-ANALYZE = """You help researchers find AI papers and news. Analyze the user's request.
+ANALYZE = """Analyze this AI research query.
 {history}
-User request: {question}
-
-Return ONLY a JSON object of this shape:
-{{"intent": "<one sentence: what the user wants>",
-  "search_queries": ["<1 to 3 short keyword queries, technical terms, no filler>"],
-  "date_window_days": <integer days if the user asks for recent/latest/this week/month, else null>,
+Query: {question}
+Return ONLY JSON:
+{{"intent": "<1 short sentence>",
+  "search_queries": ["<1-3 concise technical keyword queries>"],
+  "date_window_days": <int days if time-bounded else null>,
   "source_type": "paper" | "blog" | "any"}}"""
 
-GRADE = """You are reviewing search results for a research request.
+GRADE = """Judge each result for the query. Keep only genuinely on-topic items; write a <=25-word digest for kept items.
+Query: {question}
 
-Request: {question}
-
-Results:
 {docs}
 
-For EACH result decide if it is genuinely useful for the request (on-topic, not merely sharing a keyword).
-For useful ones, write a digest: at most 30 words on what the work does and how it bears on the request.
-Return ONLY a JSON list, one object per result, in order:
-[{{"doc": 1, "relevant": true, "digest": "<max 30 words>"}}, {{"doc": 2, "relevant": false, "digest": ""}}, ...]"""
+Return ONLY a JSON list in order:
+[{{"doc": 1, "relevant": true, "digest": "<=25 words"}}, {{"doc": 2, "relevant": false, "digest": ""}}]"""
 
-REWRITE = """The search for this request returned too few relevant results.
+REWRITE = """Too few relevant results. Write 2 alternative technical search queries (synonyms or broader terms).
+Query: {question}
+Previous: {queries}
+Return ONLY JSON: {{"search_queries": ["...", "..."]}}"""
 
-Request: {question}
-Previous queries: {queries}
+GENERATE = """Answer the AI research query using ONLY these sources.
+Query: {question}
 
-Write 2 different search queries using synonyms, broader terms or the specific technical names
-researchers would use. Return ONLY JSON: {{"search_queries": ["...", "..."]}}"""
-
-GENERATE = """You are an AI research assistant. Using ONLY the sources below, answer the request.
-
-Request: {question}
-
-Sources:
 {docs}
 
-Write 1 or 2 short paragraphs of plain prose (no headings, no lists) that summarize what these sources
-say together about the request: the main approaches, how they differ, and any concrete models or findings.
-Cite sources inline as [1], [2]. End with one final sentence that begins with "**Start with** [n]" and says
-why that source is the best one to read first.
-Do not invent sources, numbers, or links. If the sources only partly cover the request, say so."""
+Write 1-2 short paragraphs of plain prose (no headings/lists) summarizing key approaches, differences, and findings. Cite inline as [1], [2]. End with one sentence starting with "**Start with** [n]" explaining why. Never invent facts, numbers, or links."""
 
-POLISH = """Rewrite this draft LinkedIn post about recent AI research so it reads naturally and is specific.
-
-Rules:
-- Keep every listed paper or post, its title and its link exactly as written, in the same order.
-- Use only facts in the draft. Do not invent results, numbers, names or claims.
-- Plain, confident language for practitioners; no hype words, at most two emoji.
-- At most 2,200 characters. Keep the hashtags on the last line.
-- Return only the post text, nothing before or after it.
+POLISH = """Rewrite this draft LinkedIn post on recent AI research clearly for practitioners.
+Rules: keep every listed item's title, link, and order verbatim; use only facts in the draft; no hype, <=2 emoji, <=2,200 chars; keep hashtags on the last line; return only the post text.
 
 Draft:
 {draft}"""

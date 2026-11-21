@@ -29,9 +29,53 @@ MAX_POOL = 300          # compute cap for the cross-encoder, not the result coun
 MIN_RELEVANCE = 0.02    # reranker probability to count as a match; bge-reranker scores on-topic papers
                         # as low as 0.02, so this favours recall (tuned on the real corpus, Oct 2026)
 MIN_KEEP = 5            # keep at least this many matches so the LLM has something to judge
-GRADE_TOP = 10          # the LLM reviews and summarizes this many new matches per grading pass
+GRADE_TOP = 6           # the LLM reviews and summarizes up to this many new matches per grading pass
 MIN_RESULTS = 5         # always list at least this many references, flagging low matches as weak
 RANKED_KEEP = 50        # scored items remembered for padding
+GRADE_SUMMARY_CHARS = 280
+GENERATE_FALLBACK_CHARS = 240
+
+# Per-node output token budgets (replaces flat 700-token cap across all steps)
+MAX_TOKENS_ANALYZE = 140
+MAX_TOKENS_REWRITE = 90
+MAX_TOKENS_GRADE = 350
+MAX_TOKENS_GENERATE = 420
+
+_DATE_CUES: tuple[tuple[re.Pattern[str], int], ...] = (
+    (re.compile(r"\b(?:today|last\s+24\s*h(?:ours?)?|yesterday)\b", re.I), 1),
+    (re.compile(r"\b(?:last\s+3\s+days|past\s+few\s+days)\b", re.I), 3),
+    (re.compile(r"\b(?:this\s+week|last\s+week|past\s+week|past\s+7\s+days)\b", re.I), 7),
+    (re.compile(r"\b(?:this\s+month|last\s+month|past\s+month|past\s+30\s+days)\b", re.I), 30),
+    (re.compile(r"\b(?:last\s+3\s+months|past\s+quarter|last\s+90\s+days)\b", re.I), 90),
+)
+_PAPER_CUE_RE = re.compile(r"\b(?:papers?|arxiv|preprints?)\b", re.I)
+_BLOG_CUE_RE = re.compile(r"\b(?:blogs?|blog\s+posts?|announcements?|news)\b", re.I)
+
+
+def fast_analyze_query(question: str) -> dict | None:
+    """Heuristic query analyzer for concise single-turn queries (saves 1 LLM call).
+
+    Returns a dict matching `analyze_query`'s fields, or None if the query is complex enough
+    to warrant full LLM query decomposition.
+    """
+    q = " ".join((question or "").split())
+    if not q or len(q) > 120 or q.count("?") > 1:
+        return None
+    days = next((d for pat, d in _DATE_CUES if pat.search(q)), None)
+    want_paper = bool(_PAPER_CUE_RE.search(q))
+    want_blog = bool(_BLOG_CUE_RE.search(q))
+    stype = "paper" if (want_paper and not want_blog) else ("blog" if (want_blog and not want_paper) else None)
+    return {"intent": q, "queries": [q], "days": days, "source_type": stype}
+
+
+def _short_digest(summary: str, chars: int = 180) -> str:
+    text = " ".join((summary or "").split())
+    if not text:
+        return ""
+    first = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text, maxsplit=1)[0]
+    if len(first) <= chars:
+        return first
+    return first[:chars].rsplit(" ", 1)[0].rstrip(",;:") + "…"
 
 
 def extract_json(text: str) -> Any:
@@ -66,11 +110,24 @@ def format_docs(cands: list[Candidate], summary_chars: int) -> str:
         for n, c in enumerate(cands, 1))
 
 
+def format_docs_for_generate(cands: list[Candidate], fallback_chars: int = GENERATE_FALLBACK_CHARS) -> str:
+    """Reuse compact LLM/extractive digests in `generate` instead of re-sending full 700-char abstracts."""
+    blocks = []
+    for n, c in enumerate(cands, 1):
+        body = (c.get("digest") or "").strip() or c["summary"][:fallback_chars]
+        blocks.append(f"[{n}] {sanitize_document(c['title'])} ({c['source']}, {c['published'][:10]})\n"
+                      f"{sanitize_document(body)}")
+    return "\n\n".join(blocks)
+
+
 class RagNodes:
     def __init__(self, llm: BaseChatModel, store: CorpusStore, reranker=None,
                  live_search: Callable[[str], list[NewsItem]] | None = None,
                  guardrails_enabled: bool = True, pii_mode: str = "redact",
-                 max_query_chars: int = MAX_QUERY_CHARS):
+                 max_query_chars: int = MAX_QUERY_CHARS,
+                 fast_analyze: bool = False,
+                 grade_top: int | None = None,
+                 grade_skip_threshold: float = 0.75):
         self.llm = llm
         self.store = store
         self.reranker = reranker
@@ -78,9 +135,21 @@ class RagNodes:
         self.guardrails_enabled = guardrails_enabled
         self.pii_mode = pii_mode
         self.max_query_chars = max_query_chars
+        self.fast_analyze = fast_analyze
+        self.grade_top = grade_top  # None -> read module GRADE_TOP dynamically (supports monkeypatch in tests)
+        self.grade_skip_threshold = grade_skip_threshold
 
-    def _ask(self, prompt: str) -> str:
-        return self.llm.invoke([HumanMessage(content=prompt)]).content
+    def _grade_top(self) -> int:
+        return GRADE_TOP if self.grade_top is None else max(1, int(self.grade_top))
+
+    def _ask(self, prompt: str, max_tokens: int | None = None) -> str:
+        msg = [HumanMessage(content=prompt)]
+        if max_tokens is not None and hasattr(self.llm, "bind"):
+            try:
+                return self.llm.bind(max_new_tokens=max_tokens).invoke(msg).content
+            except Exception:
+                pass
+        return self.llm.invoke(msg).content
 
     def _filters(self, state: GraphState) -> tuple[list[str] | None, str | None, int | None]:
         f = state.get("filters") or {}
@@ -127,9 +196,16 @@ class RagNodes:
     def analyze_query(self, state: GraphState) -> dict:
         q = state["question"]
         hist = state.get("history") or []
+        if self.fast_analyze and not hist:
+            fast = fast_analyze_query(q)
+            if fast is not None:
+                return {**fast, "retries": 0, "live_searched": False,
+                        "trace": [f"**Analyze** (fast-path) → queries: {fast['queries']}; "
+                                  f"window: {fast['days'] or 'any'} days; type: {fast['source_type'] or 'any'}"]}
         history = ("Earlier questions in this conversation: " + " | ".join(map(str, hist[-2:]))) if hist else ""
         try:
-            data = extract_json(self._ask(prompts.ANALYZE.format(question=q, history=history)))
+            data = extract_json(self._ask(prompts.ANALYZE.format(question=q, history=history),
+                                          max_tokens=MAX_TOKENS_ANALYZE))
             queries = [s for s in data.get("search_queries", []) if isinstance(s, str) and s.strip()][:3] or [q]
             days = data.get("date_window_days")
             days = int(days) if isinstance(days, (int, float)) and days > 0 else None
@@ -236,11 +312,22 @@ class RagNodes:
     def grade_documents(self, state: GraphState) -> dict:
         verdicts = dict(state.get("verdicts") or {})
         matches = state.get("matches", [])
-        todo = [c for c in matches if c["id"] not in verdicts][:GRADE_TOP]
+        top_n = self._grade_top()
+        todo = [c for c in matches if c["id"] not in verdicts][:top_n]
+        auto_ok = 0
+        if todo and self.grade_skip_threshold <= 1.0:
+            high = [c for c in todo if float(c.get("relevance") or 0.0) >= self.grade_skip_threshold]
+            if len(high) >= MIN_RELEVANT:
+                for c in high:
+                    verdicts[c["id"]] = {"relevant": True, "digest": _short_digest(c.get("summary", ""))}
+                auto_ok = len(high)
+                todo = []  # already have >= MIN_RELEVANT high-confidence matches; skip LLM judge
         if todo:
             try:
-                out = extract_json(self._ask(prompts.GRADE.format(question=state["question"],
-                                                                  docs=format_docs(todo, 400))))
+                out = extract_json(self._ask(
+                    prompts.GRADE.format(question=state["question"], docs=format_docs(todo, GRADE_SUMMARY_CHARS)),
+                    max_tokens=MAX_TOKENS_GRADE,
+                ))
                 if isinstance(out, dict):
                     out = out.get("results") or [out]
                 for v in out:
@@ -254,10 +341,13 @@ class RagNodes:
                 verdicts.update({c["id"]: {"relevant": True, "digest": ""} for c in todo[:5]})
         matches = [c for c in matches if verdicts.get(c["id"], {}).get("relevant", True)]
         relevant = [{**c, "digest": verdicts[c["id"]]["digest"]} for c in matches if c["id"] in verdicts]
-        n_ok = sum(1 for c in todo if verdicts.get(c["id"], {}).get("relevant"))
+        if auto_ok:
+            note = f"auto-accepted {auto_ok} high-confidence matches (≥ {self.grade_skip_threshold:.2f}), LLM skipped"
+        else:
+            n_ok = sum(1 for c in todo if verdicts.get(c["id"], {}).get("relevant"))
+            note = f"{n_ok}/{len(todo)} new relevant"
         return {"verdicts": verdicts, "matches": matches, "relevant": relevant,
-                "trace": [f"**Grade** (LLM judge + digests) → {n_ok}/{len(todo)} new relevant, "
-                          f"{len(relevant)} relevant in total"]}
+                "trace": [f"**Grade** (LLM judge + digests) → {note}, {len(relevant)} relevant in total"]}
 
     def route_after_grade(self, state: GraphState) -> str:
         if len(state.get("relevant", [])) >= MIN_RELEVANT:
@@ -270,8 +360,10 @@ class RagNodes:
 
     def rewrite_query(self, state: GraphState) -> dict:
         try:
-            data = extract_json(self._ask(prompts.REWRITE.format(question=state["question"],
-                                                                 queries=state.get("queries"))))
+            data = extract_json(self._ask(
+                prompts.REWRITE.format(question=state["question"], queries=state.get("queries")),
+                max_tokens=MAX_TOKENS_REWRITE,
+            ))
             queries = [s for s in data.get("search_queries", []) if isinstance(s, str) and s.strip()][:3]
         except Exception as e:
             log.warning("rewrite fallback: %s", e)
@@ -318,8 +410,11 @@ class RagNodes:
             return {"answer": "I couldn't find anything in the corpus or on arXiv for this request. "
                               "Try broader terms.",
                     "references": [], "trace": ["**Generate** → nothing to answer from"]}
-        used = refs[:min(len(relevant), GRADE_TOP)] or refs[:MIN_KEEP]
-        answer = self._ask(prompts.GENERATE.format(question=state["question"], docs=format_docs(used, 700)))
+        used = refs[:min(len(relevant), self._grade_top())] or refs[:MIN_KEEP]
+        answer = self._ask(
+            prompts.GENERATE.format(question=state["question"], docs=format_docs_for_generate(used)),
+            max_tokens=MAX_TOKENS_GENERATE,
+        )
         if not relevant:
             answer = "_No result passed the relevance check; these are the closest matches._\n\n" + answer
         padded = f" ({len(refs) - n_pad} + {n_pad} low-match to reach {MIN_RESULTS})" if n_pad else ""

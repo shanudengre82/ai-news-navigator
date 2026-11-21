@@ -19,6 +19,7 @@ from typing import Callable
 import gradio as gr
 
 from ai_news.atlas import collection_stats, research_map, topic_of
+from ai_news.config import settings as app_settings
 from ai_news.fetchers.common import parse_iso
 from ai_news.history import add_entry, find, history_html, make_entry, restore
 from ai_news.post import (DEFAULT_PICKS, LINKEDIN_LIMIT, OTHER, TOPICS, WEEK_DAYS, category_count, draft_post,
@@ -1433,9 +1434,9 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
             note = "working" if ok else (html.escape(st.removeprefix("error: "))[:120] or "not fetched yet")
             trs.append(f'<tr><td><span class="nv-dot {"ok" if ok else "bad"}"></span>{html.escape(name)}</td>'
                        f'<td class="n">{s["by_source"].get(name, 0):,}</td><td>{note}</td></tr>')
-        where = ("New items are collected every 12 hours by a GitHub Action and saved to a Hugging Face "
-                 "dataset; this app downloads the latest copy every hour." if pull_mode else
-                 "This app collects new items itself every few hours.")
+        where = ("New items are collected weekly by a GitHub Action and saved to a Hugging Face "
+                 "dataset; this app downloads the latest copy weekly (or on demand below)." if pull_mode else
+                 "This app collects new items on a weekly schedule (or on demand below).")
         return (f'<div class="nv-sources"><p class="nv-hint">{s["total"]:,} items, updated {ago(s["last_refresh"])}. '
                 f'{where}</p><table><thead><tr><th>Source</th><th style="text-align:right">Items</th>'
                 f'<th>Last update</th></tr></thead><tbody>{"".join(trs)}</tbody></table></div>')
@@ -1448,11 +1449,11 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
 
     def map_data(*_) -> dict:  # Gradio passes the JS call's arguments; this takes none
         """The research map (topics, papers, links); fetched by the map's own script, not part of the API."""
-        return research_map(store)
+        return research_map(store, max_age_days=app_settings.map_refresh_days)
 
     def landing() -> tuple[str, str, str, str]:
         s = collection_stats(store)
-        m = research_map(store)
+        m = research_map(store, max_age_days=app_settings.map_refresh_days)
         return map_intro_html(m["topics"]), landing_html(s), trend_html(s), map_payload_html(m)
 
     global _topic_lookup

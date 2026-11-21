@@ -40,9 +40,16 @@ class Settings:
     # GitHub Action (.github/workflows/refresh-corpus.yml) pushes to DATASET_REPO.
     refresh_mode: str = field(default_factory=lambda: os.getenv("REFRESH_MODE", "fetch").strip().lower())
     lookback_days: int = field(default_factory=lambda: int(os.getenv("LOOKBACK_DAYS", "30")))
-    refresh_hours: float = field(default_factory=lambda: float(os.getenv("REFRESH_HOURS", "6")))
-    refresh_on_start: bool = field(default_factory=lambda: _bool("REFRESH_ON_START", True))
+    refresh_hours: float = field(default_factory=lambda: float(os.getenv("REFRESH_HOURS", "168")))
+    refresh_on_start: bool = field(default_factory=lambda: _bool("REFRESH_ON_START", False))
     push_to_hub: bool = field(default_factory=lambda: _bool("PUSH_TO_HUB", True))
+
+    # Weekly 3D research map cache + inference token optimizations
+    map_refresh_days: float = field(default_factory=lambda: float(os.getenv("MAP_REFRESH_DAYS", "7")))
+    fast_analyze: bool = field(default_factory=lambda: _bool("FAST_ANALYZE", True))
+    grade_top: int = field(default_factory=lambda: int(os.getenv("GRADE_TOP", "6")))
+    grade_skip_threshold: float = field(default_factory=lambda: float(os.getenv("GRADE_SKIP_THRESHOLD", "0.75")))
+    query_cache_size: int = field(default_factory=lambda: int(os.getenv("QUERY_CACHE_SIZE", "64")))
 
     # Guardrails & PII checks
     guardrails_enabled: bool = field(default_factory=lambda: _bool("GUARDRAILS_ENABLED", True))
