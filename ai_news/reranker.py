@@ -37,10 +37,20 @@ class CrossEncoderScorer:
     """Thin wrapper over `sentence_transformers.CrossEncoder` returning relevance probabilities in [0, 1]."""
 
     def __init__(self, model_id: str, device: str | None = None, max_length: int = 512, batch_size: int = 16):
+        import torch
         from sentence_transformers import CrossEncoder
         self.model_id = model_id
+        self.device = device or _default_device()
         self.batch_size = batch_size
-        self.model = CrossEncoder(model_id, device=device or _default_device(), max_length=max_length)
+        kwargs: dict = {"device": self.device, "max_length": max_length}
+        if self.device == "cuda":
+            # Half the VRAM and ZeroGPU torch.move() transfer time compared to float32
+            kwargs["model_kwargs"] = {"dtype": torch.bfloat16}
+        try:
+            self.model = CrossEncoder(model_id, **kwargs)
+        except TypeError:
+            kwargs.pop("model_kwargs", None)
+            self.model = CrossEncoder(model_id, **kwargs)
 
     def score(self, query: str, passages: list[str]) -> list[float]:
         import torch
@@ -150,6 +160,8 @@ class TwoStageReranker:
         mmr_lambda: float = 0.85,
         mmr_window: int = 25,
         device: str | None = None,
+        stage1_device: str | None = None,
+        stage2_device: str | None = None,
         stage1_scorer: PassageScorer | None = None,
         stage2_scorer: PassageScorer | None = None,
     ):
@@ -157,18 +169,21 @@ class TwoStageReranker:
         self.stage2_weight = min(max(float(stage2_weight), 0.0), 1.0)
         self.mmr_lambda = min(max(float(mmr_lambda), 0.0), 1.0)
         self.mmr_window = max(2, int(mmr_window))
+        s1_dev = stage1_device or device
+        s2_dev = stage2_device or device
 
         if stage1_scorer is not None:
             self.stage1: PassageScorer = stage1_scorer
         else:
             assert stage1_model_id, "stage1_model_id or stage1_scorer is required"
-            self.stage1 = CrossEncoderScorer(stage1_model_id, device=device, max_length=512, batch_size=32)
+            self.stage1 = CrossEncoderScorer(stage1_model_id, device=s1_dev, max_length=512, batch_size=32)
 
         if stage2_scorer is not None:
             self.stage2: PassageScorer | None = stage2_scorer
         elif stage2_model_id:
             try:
-                self.stage2 = CrossEncoderScorer(stage2_model_id, device=device, max_length=1024, batch_size=16)
+                max_len = 512 if s2_dev == "cpu" else 1024
+                self.stage2 = CrossEncoderScorer(stage2_model_id, device=s2_dev, max_length=max_len, batch_size=16)
             except Exception as e:
                 log.warning("Stage-2 reranker %s unavailable (%s); falling back to Stage 1 only", stage2_model_id, e)
                 self.stage2 = None

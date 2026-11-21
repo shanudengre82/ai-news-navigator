@@ -91,3 +91,16 @@ def test_mmr_diversity_promotes_distinct_item_over_near_duplicate():
     reordered, applied = mmr_reorder(items, vecs, mmr_lambda=0.6, window=10)
     assert applied is True
     assert [c["id"] for c in reordered] == ["a", "b", "a_dup"]
+
+
+def test_space_settings_keep_stage2_off_zerogpu_cuda(monkeypatch):
+    from ai_news.config import Settings
+
+    monkeypatch.setenv("SPACE_ID", "shanudengre82/ai-news-navigator")
+    monkeypatch.delenv("RERANK_STAGE2_MODEL_ID", raising=False)
+    monkeypatch.delenv("RERANK_STAGE2_DEVICE", raising=False)
+    monkeypatch.delenv("RERANK_STAGE1_TOP_K", raising=False)
+    s = Settings()
+    assert s.rerank_stage2_model_id == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert s.rerank_stage2_device == "cpu"
+    assert s.rerank_stage1_top_k == 25

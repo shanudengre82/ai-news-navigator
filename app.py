@@ -43,6 +43,7 @@ llm = load_chat_model(settings.llm_backend, settings.llm_model_id, settings.llm_
 reranker = TwoStageReranker(
     stage1_model_id=settings.rerank_model_id,
     stage2_model_id=settings.rerank_stage2_model_id,
+    stage2_device=settings.rerank_stage2_device,
     stage1_top_k=settings.rerank_stage1_top_k,
     stage2_weight=settings.rerank_stage2_weight,
     mmr_lambda=settings.rerank_mmr_lambda,
@@ -75,7 +76,7 @@ def run_refresh() -> str:
     return msg
 
 
-@spaces.GPU(duration=45)  # ZeroGPU reserves ~1.5x this from the visitor's daily quota
+@spaces.GPU(duration=60)  # ZeroGPU reserves ~1.5x this from the visitor's daily quota
 def _assistant_gpu(question: str, history_texts: list[str], filters: dict):
     """Runs in the ZeroGPU worker: yields plain dicts (picklable) and reports errors as events."""
     yield from run_events(graph, store, question, history_texts, filters)
@@ -132,7 +133,7 @@ def research_assistant(message: str, history: list, sources: list[str], source_t
     yield from render(_cached_or_gpu(message, history_texts, {}), history, message, view)
 
 
-@spaces.GPU(duration=35)
+@spaces.GPU(duration=45)
 def _polish_gpu(draft: str) -> str:
     """Runs in the ZeroGPU worker: one LLM call that rewrites the weekly post."""
     from langchain_core.messages import HumanMessage

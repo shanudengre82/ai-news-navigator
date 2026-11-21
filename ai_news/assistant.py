@@ -78,9 +78,14 @@ def run_events(graph, store: CorpusStore, question: str, history: list[str], fil
 
 
 def error_message(err: str) -> str:
-    if "quota" in err.lower():
+    low = err.lower()
+    if "quota" in low:
         return ("**The free GPU time for this visitor is used up.** Log in to huggingface.co for more GPU "
                 "time, or try again later. Search and Latest keep working without a GPU.\n\n"
+                f"Details: `{err}`")
+    if "zerogputaskexception" in low or "zerogpu" in low:
+        return ("**The temporary GPU worker hit a runtime error.** Please try asking again in a few seconds "
+                "(Search and Latest work without a GPU).\n\n"
                 f"Details: `{err}`")
     return (f"**The assistant stopped with an error.** Ask again in a moment; Search still works.\n\n"
             f"Details: `{err}`")

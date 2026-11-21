@@ -116,6 +116,8 @@ def test_quota_errors_get_a_friendly_hint():
     from ai_news.assistant import error_message
     msg = error_message("Error: 'You have exceeded your ZeroGPU quota (180s requested vs. 179s left).'")
     assert "Log in" in msg and "quota" in msg
+    zmsg = error_message("ZeroGPUTaskException: RuntimeError")
+    assert "GPU worker" in zmsg and "ZeroGPUTaskException" in zmsg
 
 
 def test_references_show_match_scores_and_warn_on_low_matches():

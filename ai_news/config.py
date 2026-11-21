@@ -27,12 +27,24 @@ class Settings:
     llm_max_new_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_NEW_TOKENS", "700")))
     embed_model_id: str = field(default_factory=lambda: os.getenv("EMBED_MODEL_ID", "BAAI/bge-small-en-v1.5"))
     rerank_model_id: str = field(default_factory=lambda: os.getenv("RERANK_MODEL_ID", "BAAI/bge-reranker-base"))
-    # Stage-2 fine cross-encoder re-reranker (set to "" or "none" to disable Stage 2 on small GPUs).
+    # Stage-2 fine cross-encoder re-reranker. On ZeroGPU Spaces (SPACE_ID set), default to a lightweight
+    # CPU cross-encoder so ZeroGPU's torch.move() only transfers Qwen + Stage-1 (bfloat16) to the GPU.
     rerank_stage2_model_id: str | None = field(default_factory=lambda: (
-        None if os.getenv("RERANK_STAGE2_MODEL_ID", "BAAI/bge-reranker-v2-m3").strip().lower() in {"", "none", "false", "0"}
-        else os.getenv("RERANK_STAGE2_MODEL_ID", "BAAI/bge-reranker-v2-m3").strip()
+        None if os.getenv(
+            "RERANK_STAGE2_MODEL_ID",
+            "cross-encoder/ms-marco-MiniLM-L-6-v2" if os.getenv("SPACE_ID") else "BAAI/bge-reranker-v2-m3",
+        ).strip().lower() in {"", "none", "false", "0"}
+        else os.getenv(
+            "RERANK_STAGE2_MODEL_ID",
+            "cross-encoder/ms-marco-MiniLM-L-6-v2" if os.getenv("SPACE_ID") else "BAAI/bge-reranker-v2-m3",
+        ).strip()
     ))
-    rerank_stage1_top_k: int = field(default_factory=lambda: int(os.getenv("RERANK_STAGE1_TOP_K", "40")))
+    rerank_stage2_device: str | None = field(default_factory=lambda: (
+        os.getenv("RERANK_STAGE2_DEVICE", "cpu" if os.getenv("SPACE_ID") else "").strip() or None
+    ))
+    rerank_stage1_top_k: int = field(default_factory=lambda: int(
+        os.getenv("RERANK_STAGE1_TOP_K", "25" if os.getenv("SPACE_ID") else "40")
+    ))
     rerank_stage2_weight: float = field(default_factory=lambda: float(os.getenv("RERANK_STAGE2_WEIGHT", "0.7")))
     rerank_mmr_lambda: float = field(default_factory=lambda: float(os.getenv("RERANK_MMR_LAMBDA", "0.85")))
 
