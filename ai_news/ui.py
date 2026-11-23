@@ -583,7 +583,7 @@ CSS = """
 .nv-more, .nv-more button { border:1px solid var(--rule) !important; }
 .nv-flush, .nv-flush .html-container { padding:0 !important; }
 /* when the three panes wrap (tablets, phones), show the short steps panel before the long results */
-@media (max-width: 1100px) { .nv-steps { order:2; } .nv-center { order:3; } }
+@media (max-width: 1100px) { .nv-desk.nv-asked .nv-right { order:2; } .nv-desk.nv-asked .nv-center { order:3; } }
 
 /* question box is the hero */
 .nv-ask textarea { font-family:var(--serif) !important; font-size:21px !important; line-height:1.4 !important;
@@ -685,8 +685,9 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-sources th { text-align:left; font-weight:600; color:var(--graphite); padding:6px 12px 6px 0; }
 .nv-sources td { padding:7px 12px 7px 0; border-top:1px solid var(--rule); vertical-align:top; }
 .nv-sources td.n { text-align:right; font-variant-numeric:tabular-nums; }
-.nv-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px; }
-.nv-dot.ok { background:var(--kept); } .nv-dot.bad { background:var(--dropped); }
+.nv-sources .nv-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px; }
+.nv-sources .nv-dot::before { content:none; }
+.nv-sources .nv-dot.ok { background:var(--kept); } .nv-sources .nv-dot.bad { background:var(--dropped); }
 
 /* about: technical summary */
 .nv-about { font-size:15px; line-height:1.55; color:var(--ink); }
@@ -709,19 +710,20 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-about code { font-size:.9em; background:color-mix(in srgb, var(--rule) 45%, transparent); padding:0 4px;
   border-radius:3px; white-space:normal; word-break:break-word; }
 
-/* landing: before the first question the desk is two panes, the question and the map; the steps pane, the
-   list filters and "start over" only appear once there is an answer to work on */
+/* landing: before the first question the right pane holds the map's trend and topic legend (.nv-idle);
+   once asked, the right pane switches to the steps sieve (.nv-steps) and the list filters appear */
 .nv-desk:not(.nv-asked) :is(.nv-steps, .nv-refine, .nv-reset) { display:none !important; }
 .nv-desk.nv-asked .nv-idle { display:none !important; }
 .nv-idle-note { font-size:15px; line-height:1.55; color:var(--graphite); margin:4px 0 8px; max-width:38ch; }
-.nv-landing { gap:0 !important; }
+.nv-landing, .nv-land-side { gap:0 !important; }
 .nv-landing.nv-off { display:none !important; }
 .nv-land-h { font-family:var(--serif); font-weight:500; font-size:21px; color:var(--ink); margin:0; }
 .nv-land-note { font-size:13px; color:var(--graphite); margin:2px 0 12px; max-width:68ch; }
-.nv-map-intro { margin-top:24px; }
+.nv-map-intro { margin-top:20px; }
 
-/* the strip under the map: papers per day, coloured on the map's own recency ramp, so it reads as its legend */
-.nv-trend { margin-top:10px; }
+/* the trend strip in the right pane: papers per day, coloured on the map's own recency ramp */
+.nv-trend { margin-top:0; }
+.nv-trend > .nv-trend-line:first-child { margin-top:0; }
 .nv-chart { position:relative; }
 .nv-bars { position:relative; display:flex; align-items:flex-end; gap:3px; height:56px;
   border-bottom:1px solid var(--graphite); }
@@ -739,9 +741,10 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-bar:first-child .tip, .nv-bar:nth-child(2) .tip, .nv-bar:nth-child(3) .tip { left:0; transform:none; }
 .nv-bar:nth-last-child(-n+3) .tip { left:auto; right:0; transform:none; }
 .nv-bar:hover .tip, .nv-bar:focus-visible .tip { display:block; }
-.nv-xlabs { display:flex; justify-content:space-between; gap:12px; margin-top:4px; font-size:12px;
+.nv-xlabs { display:flex; justify-content:space-between; gap:8px; margin-top:4px; font-size:12px;
   color:var(--graphite); }
 .nv-xlabs .mid { text-align:center; }
+.nv-right .nv-xlabs .mid { display:none; }
 .nv-trend-line { font-family:var(--serif); font-size:17px; line-height:1.55; color:var(--ink);
   margin:12px 0 2px; max-width:68ch; }
 .nv-chart-table { margin-top:4px; font-size:13px; color:var(--graphite); }
@@ -749,10 +752,10 @@ button.nv-reset, .nv-reset button { border:1px solid var(--rule) !important; pad
 .nv-chart-table table { border-collapse:collapse; margin-top:6px; font-variant-numeric:tabular-nums; }
 .nv-chart-table td, .nv-chart-table th { padding:2px 14px 2px 0; text-align:left; }
 .nv-topics { display:flex; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
-.nv-topics button { font-size:13px; padding:5px 10px; border:1px solid var(--rule); border-radius:999px;
+.nv-topics button { display:inline-flex; align-items:center; max-width:100%; text-align:left;
+  font-size:13px; padding:5px 10px; border:1px solid var(--rule); border-radius:999px;
   background:var(--field); color:var(--ink); cursor:pointer; }
 .nv-topics button:hover { border-color:var(--kept); }
-.nv-topics button { display:inline-flex; align-items:center; }
 .nv-topics button span { color:var(--graphite); margin-left:6px; font-variant-numeric:tabular-nums; }
 
 .nv-map { position:relative; height:clamp(480px, 68vh, 760px); border:1px solid var(--rule); border-radius:4px; overflow:hidden;
@@ -1544,12 +1547,14 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                                     elem_classes="nv-flush")
                             map_payload = gr.HTML("", elem_classes="nv-flush")  # populated privately by demo.load
                             stats = gr.HTML(elem_classes="nv-flush")  # only says something while empty
+                    # third panel on the right: map legend + topics on landing, assistant steps once asked
+                    with gr.Column(scale=1, min_width=280, elem_classes="nv-right"):
+                        with gr.Column(elem_classes=["nv-idle", "nv-land-side"]):
                             trend = gr.HTML(elem_classes="nv-flush")  # papers-per-day strip: the map's legend
                             map_intro = gr.HTML(elem_classes="nv-flush")
-                    # hidden until the first question (see .nv-asked in CSS)
-                    with gr.Column(scale=1, min_width=260, elem_classes="nv-steps"):
-                        gr.HTML('<p class="nv-pane-h">What the assistant did</p>', elem_classes="nv-flush")
-                        sieve = gr.HTML(STEPS_EMPTY, elem_classes="nv-flush")
+                        with gr.Column(elem_classes="nv-steps"):
+                            gr.HTML('<p class="nv-pane-h">What the assistant did</p>', elem_classes="nv-flush")
+                            sieve = gr.HTML(STEPS_EMPTY, elem_classes="nv-flush")
                 conv = gr.State([])
                 results = gr.State({})
                 shown = gr.State(REF_PAGE)

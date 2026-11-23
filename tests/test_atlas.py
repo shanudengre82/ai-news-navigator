@@ -160,6 +160,12 @@ def test_theme_menu_and_css(store):
     for name in ("mono", "sunset", "ocean"):
         assert f'html[data-nv-theme="{name}"], ' in ui.CSS and f'html[data-nv-theme="{name}"] .dark' in ui.CSS
     assert "--topic-1:#2a78d6" in ui.CSS and "%(" not in ui.CSS
+    # Sources status dot must be scoped so it does not shrink topic chip buttons (.nv-topics button.nv-dot)
+    assert ".nv-sources .nv-dot {" in ui.CSS
+    assert "\n.nv-dot {" not in ui.CSS
+    # Third panel swaps landing info (.nv-idle) for assistant steps (.nv-steps) when asked
+    assert ".nv-desk:not(.nv-asked) :is(.nv-steps, .nv-refine, .nv-reset)" in ui.CSS
+    assert ".nv-desk.nv-asked .nv-idle" in ui.CSS
 
 
 def test_map_payload_html_roundtrips_json():
