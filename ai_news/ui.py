@@ -21,7 +21,9 @@ import gradio as gr
 from ai_news.atlas import collection_stats, research_map, topic_of
 from ai_news.config import settings as app_settings
 from ai_news.fetchers.common import parse_iso
+from ai_news.guardrails import get_guardrail_catalog
 from ai_news.history import add_entry, find, history_html, make_entry, restore
+from ai_news.observability import read_recent_traces
 from ai_news.post import (DEFAULT_PICKS, LINKEDIN_LIMIT, OTHER, TOPICS, WEEK_DAYS, category_count, draft_post,
                           fold_preview, topic_matches, topic_spec)
 from ai_news.rag.state import Candidate
@@ -620,6 +622,49 @@ CSS = """
   border-radius:2px; }
 .nv-legend .k { background:var(--kept); }
 .nv-legend .d { border:1.5px solid var(--dropped); margin-left:12px; }
+
+/* inline guardrails & PII verdict card under the sieve */
+.nv-guard { margin:14px 0 8px; padding:10px 12px; border:1px solid var(--rule); border-radius:4px;
+  background:var(--field); font-size:13px; line-height:1.45; color:var(--ink); }
+.nv-guard-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
+.nv-guard-title { font-size:12px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--graphite); }
+.nv-guard-pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+.nv-guard-pill.ok { color:var(--kept); background:color-mix(in srgb, var(--kept) 14%, transparent); }
+.nv-guard-pill.warn { color:var(--dropped); background:color-mix(in srgb, var(--dropped) 16%, transparent); }
+.nv-guard-pill.bad { color:var(--dropped); border:1.5px solid var(--dropped); background:color-mix(in srgb, var(--dropped) 12%, transparent); }
+.nv-guard-list { list-style:none; margin:0; padding:0; display:grid; gap:3px; }
+.nv-guard-list li { display:flex; justify-content:space-between; gap:8px; }
+.nv-guard-list .k { color:var(--graphite); flex:none; }
+.nv-guard-list .v { text-align:right; overflow-wrap:anywhere; }
+.nv-guard-checks { margin-top:8px; padding-top:6px; border-top:1px solid var(--rule); font-size:12px; }
+.nv-guard-checks summary { cursor:pointer; color:var(--graphite); }
+.nv-guard-checks ul { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:4px; }
+.nv-guard-checks li { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
+
+/* guardrails catalog (Technical, Ethical, Operational pillars) */
+.nv-catalog { margin:0 0 18px; border:1px solid var(--rule); border-radius:4px; background:var(--field); padding:10px 14px; }
+.nv-catalog > summary { cursor:pointer; font-weight:600; font-size:14px; color:var(--ink); }
+.nv-catalog-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-top:12px; }
+.nv-pillar h3 { font-family:var(--serif); font-size:18px; font-weight:500; margin:0 0 8px; color:var(--ink);
+  padding-bottom:4px; border-bottom:1px solid var(--rule); }
+.nv-rule-list { list-style:none; margin:0; padding:0; display:grid; gap:10px; }
+.nv-rule-item { font-size:13px; line-height:1.45; }
+.nv-rule-head { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:2px; }
+.nv-rule-name { font-weight:600; color:var(--ink); }
+.nv-rule-tag { font-size:11px; padding:1px 6px; border-radius:999px; border:1px solid var(--rule); color:var(--graphite); }
+.nv-rule-desc { margin:0; color:var(--graphite); }
+
+/* traces tab */
+.nv-traces-stats { display:flex; flex-wrap:wrap; gap:10px 18px; margin:6px 0 12px; font-size:14px; color:var(--graphite); }
+.nv-traces-stats strong { color:var(--ink); font-variant-numeric:tabular-nums; }
+.nv-traces table { border-collapse:collapse; width:100%; font-size:14px; }
+.nv-traces th { text-align:left; font-weight:600; color:var(--graphite); padding:6px 12px 6px 0; white-space:nowrap; }
+.nv-traces td { padding:9px 12px 9px 0; border-top:1px solid var(--rule); vertical-align:top; }
+.nv-traces td.prompt { max-width:340px; overflow-wrap:anywhere; font-family:var(--serif); font-size:15px; }
+.nv-traces td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.nv-traces details summary { cursor:pointer; font-size:12px; color:var(--graphite); }
+.nv-traces details pre { margin:6px 0 0; padding:8px; max-width:420px; max-height:220px; overflow:auto;
+  font-size:12px; background:var(--field); border:1px solid var(--rule); border-radius:4px; white-space:pre-wrap; }
 
 /* answer prose */
 .nv-answer { font-family:var(--serif); font-size:17px; line-height:1.55; color:var(--ink); }
@@ -1246,7 +1291,216 @@ def _bar(count: int, was: int | None, total: int) -> str:
     return f'<span class="nv-rail" aria-hidden="true">{was_el}<span class="kept" style="width:{pct(count)}%"></span></span>'
 
 
-def sieve_html(total: int, steps: list[dict], trace: list[str] | None = None, working: bool = False) -> str:
+def _fmt_pii(findings: list[dict] | None) -> str:
+    if not findings:
+        return "None"
+    return ", ".join(f"{f.get('entity_type', '?')}×{f.get('count', 1)}" for f in findings)
+
+
+def guardrail_card_html(report: dict | None) -> str:
+    """Compact inline Guardrails & PII verdict card shown in the right panel after a prompt finishes."""
+    if not report:
+        return ""
+    allowed = bool(report.get("allowed", True))
+    in_flags = list(report.get("input_flags") or [])
+    out_flags = list(report.get("output_flags") or [])
+    in_pii = list(report.get("input_pii") or [])
+    out_pii = list(report.get("output_pii") or [])
+    docs_san = int(report.get("docs_sanitized") or 0)
+    valid_cites = list(report.get("valid_citations") or [])
+    invalid_cites = list(report.get("invalid_citations") or [])
+    bad_urls = list(report.get("hallucinated_urls") or [])
+    cached = bool(report.get("cached"))
+
+    if not allowed:
+        pill_cls, pill_txt = "bad", "Blocked"
+    elif in_flags or out_flags or in_pii or out_pii or docs_san:
+        pill_cls, pill_txt = "warn", "Flagged"
+    else:
+        pill_cls, pill_txt = "ok", "Passed"
+    if cached:
+        pill_txt += " · cached"
+
+    in_val = "Passed" if allowed else ("Blocked (" + ", ".join(in_flags or ["policy"]) + ")")
+    if allowed and in_flags:
+        in_val = ", ".join(in_flags)
+
+    pii_parts = []
+    if in_pii:
+        pii_parts.append(f"in: {_fmt_pii(in_pii)}")
+    if out_pii:
+        pii_parts.append(f"out: {_fmt_pii(out_pii)}")
+    pii_val = "; ".join(pii_parts) if pii_parts else "None detected"
+
+    rows_ = [
+        f'<li><span class="k">Input</span><span class="v">{html.escape(in_val)}</span></li>',
+        f'<li><span class="k">PII</span><span class="v">{html.escape(pii_val)}</span></li>',
+    ]
+    if docs_san:
+        rows_.append(f'<li><span class="k">Docs sanitized</span><span class="v">{docs_san}</span></li>')
+    if allowed:
+        tot_cites = len(valid_cites) + len(invalid_cites)
+        out_parts = []
+        if tot_cites:
+            out_parts.append(f"{len(valid_cites)}/{tot_cites} cites valid")
+        if invalid_cites:
+            out_parts.append(f"{len(invalid_cites)} stripped")
+        if bad_urls:
+            out_parts.append(f"{len(bad_urls)} URLs removed")
+        if not out_parts:
+            out_parts.append(", ".join(out_flags) if out_flags else "Clean")
+        rows_.append(f'<li><span class="k">Output</span><span class="v">{html.escape(" · ".join(out_parts))}</span></li>')
+
+    checks = list(report.get("checks") or [])
+    checks_html = ""
+    if checks:
+        items = []
+        for c in checks:
+            st = str(c.get("status") or "passed")
+            cls = "bad" if st == "blocked" else ("warn" if st in ("redacted", "sanitized", "warned") else "ok")
+            detail_txt = f" — {c['detail']}" if c.get("detail") and c["detail"] not in ("ok", "clean") else ""
+            items.append(
+                f'<li><span>{html.escape(str(c.get("name") or c.get("id") or ""))}{html.escape(detail_txt)}</span>'
+                f'<span class="nv-guard-pill {cls}">{html.escape(st)}</span></li>'
+            )
+        checks_html = (
+            f'<details class="nv-guard-checks"><summary>Rule checks ({len(checks)})</summary>'
+            f'<ul>{"".join(items)}</ul></details>'
+        )
+
+    return (
+        f'<div class="nv-guard" aria-label="Guardrails and PII check results">'
+        f'<div class="nv-guard-head"><span class="nv-guard-title">Guardrails &amp; PII</span>'
+        f'<span class="nv-guard-pill {pill_cls}">{html.escape(pill_txt)}</span></div>'
+        f'<ul class="nv-guard-list">{"".join(rows_)}</ul>{checks_html}</div>'
+    )
+
+
+def guardrails_catalog_html() -> str:
+    """Render all custom-defined guardrails grouped by Patronus AI pillar with descriptions."""
+    catalog = get_guardrail_catalog()
+    pillars = ("Technical", "Ethical", "Operational")
+    sections = []
+    for p in pillars:
+        rules = [r for r in catalog if r.pillar == p]
+        if not rules:
+            continue
+        lis = []
+        for r in rules:
+            lis.append(
+                f'<li class="nv-rule-item"><div class="nv-rule-head">'
+                f'<span class="nv-rule-name">{html.escape(r.name)}</span>'
+                f'<span class="nv-rule-tag">{html.escape(r.stage)}</span>'
+                f'<span class="nv-rule-tag">{html.escape(r.action)}</span>'
+                f'</div><p class="nv-rule-desc">{html.escape(r.description)}</p></li>'
+            )
+        sections.append(f'<section class="nv-pillar"><h3>{p} ({len(rules)})</h3>'
+                        f'<ul class="nv-rule-list">{"".join(lis)}</ul></section>')
+    return (
+        f'<details class="nv-catalog" open>'
+        f'<summary>Custom Guardrails Catalog ({len(catalog)} active rules · Technical, Ethical &amp; Operational)</summary>'
+        f'<div class="nv-catalog-grid">{"".join(sections)}</div></details>'
+    )
+
+
+def traces_html(entries: list[dict], log_path: str = "") -> str:
+    """Render the per-prompt Guardrails & PII trace table for the Traces tab."""
+    if not entries:
+        where = f" (log: <code>{html.escape(log_path)}</code>)" if log_path else ""
+        return (f'<div class="nv-traces"><p class="nv-hint">No prompts traced yet for this filter{where}. '
+                f'Ask a question on the Ask tab or rewrite a draft on the Post tab to see guardrail and PII '
+                f'check results recorded here.</p></div>')
+
+    total = len(entries)
+    n_blocked = sum(1 for e in entries if (e.get("guardrail_report") or {}).get("allowed") is False
+                    or (e.get("output") or {}).get("guardrail_blocked")
+                    or (e.get("output") or {}).get("blocked"))
+    n_pii = sum(1 for e in entries if (e.get("guardrail_report") or {}).get("input_pii")
+                or (e.get("guardrail_report") or {}).get("output_pii")
+                or (e.get("scores", {}).get("pii_detected", [0])[0] > 0)
+                or (e.get("scores", {}).get("polish_pii_detected", [0])[0] > 0))
+    n_passed = total - n_blocked
+    ep_labels = {"rag_assistant": "Ask", "rag_assistant_cached": "Ask (cached)", "polish_post": "Post rewrite"}
+
+    trs = []
+    for e in entries:
+        rep = e.get("guardrail_report") or {}
+        ts = str(e.get("timestamp") or "")[:19].replace("T", " ")
+        ep = ep_labels.get(str(e.get("entrypoint") or ""), str(e.get("entrypoint") or "—"))
+        prompt = str(e.get("prompt_redacted") or "")[:160]
+        if len(str(e.get("prompt_redacted") or "")) > 160:
+            prompt += "…"
+        allowed = rep.get("allowed", not bool((e.get("output") or {}).get("guardrail_blocked") or (e.get("output") or {}).get("blocked")))
+        in_flags = rep.get("input_flags") or []
+        out_flags = rep.get("output_flags") or []
+        in_pii = rep.get("input_pii") or []
+        out_pii = rep.get("output_pii") or []
+        docs_san = int(rep.get("docs_sanitized") or 0)
+
+        if not allowed:
+            in_badge = f'<span class="nv-guard-pill bad">Blocked</span>'
+            if in_flags:
+                in_badge += f'<div style="font-size:12px;color:var(--graphite);margin-top:2px">{html.escape(", ".join(in_flags))}</div>'
+        elif in_flags:
+            in_badge = f'<span class="nv-guard-pill warn">{html.escape(", ".join(in_flags))}</span>'
+        else:
+            in_badge = '<span class="nv-guard-pill ok">Passed</span>'
+
+        pii_parts = []
+        if in_pii:
+            pii_parts.append(f"in: {_fmt_pii(in_pii)}")
+        if out_pii:
+            pii_parts.append(f"out: {_fmt_pii(out_pii)}")
+        pii_cell = (f'<span class="nv-guard-pill warn">{html.escape("; ".join(pii_parts))}</span>'
+                    if pii_parts else '<span style="color:var(--graphite)">None</span>')
+
+        out_parts = []
+        valid_c = rep.get("valid_citations") or []
+        invalid_c = rep.get("invalid_citations") or []
+        if valid_c or invalid_c:
+            out_parts.append(f"{len(valid_c)}/{len(valid_c) + len(invalid_c)} cites")
+        if docs_san:
+            out_parts.append(f"{docs_san} doc sanitized")
+        if out_flags:
+            out_parts.append(", ".join(out_flags))
+        out_cell = html.escape(" · ".join(out_parts)) if out_parts else ("—" if not allowed else "Clean")
+
+        lat = e.get("latency_ms")
+        lat_s = f"{float(lat):.0f} ms" if lat is not None else "—"
+        detail_json = html.escape(json.dumps({
+            "trace_id": e.get("trace_id"),
+            "guardrail_report": rep,
+            "scores": e.get("scores"),
+            "spans": e.get("spans"),
+            "error": e.get("error"),
+        }, indent=2, ensure_ascii=False))
+        inspect = f'<details><summary>Inspect</summary><pre>{detail_json}</pre></details>'
+        trs.append(
+            f'<tr><td style="white-space:nowrap;font-size:12px;color:var(--graphite)">{html.escape(ts)}</td>'
+            f'<td style="white-space:nowrap">{html.escape(ep)}</td>'
+            f'<td class="prompt">{html.escape(prompt) or "—"}</td>'
+            f'<td>{in_badge}</td><td>{pii_cell}</td><td>{out_cell}</td>'
+            f'<td class="num">{html.escape(lat_s)}</td><td>{inspect}</td></tr>'
+        )
+
+    summary = (
+        f'<div class="nv-traces-stats">'
+        f'<span><strong>{total:,}</strong> traced</span>'
+        f'<span><strong>{n_passed:,}</strong> passed</span>'
+        f'<span><strong>{n_blocked:,}</strong> blocked</span>'
+        f'<span><strong>{n_pii:,}</strong> with PII</span>'
+        f'</div>'
+    )
+    return (
+        f'<div class="nv-traces">{summary}'
+        f'<table><thead><tr><th>UTC time</th><th>Source</th><th>Prompt (PII-redacted)</th>'
+        f'<th>Input check</th><th>PII</th><th>Output check</th><th style="text-align:right">Latency</th>'
+        f'<th>Details</th></tr></thead><tbody>{"".join(trs)}</tbody></table></div>'
+    )
+
+
+def sieve_html(total: int, steps: list[dict], trace: list[str] | None = None, working: bool = False,
+               guardrail_report: dict | None = None) -> str:
     """The narrowing from the whole collection to the items used in the answer, one row per step."""
     if not steps and not working:
         return STEPS_EMPTY
@@ -1282,7 +1536,8 @@ def sieve_html(total: int, steps: list[dict], trace: list[str] | None = None, wo
         lines = "".join(f"<li>{re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'<strong>\1</strong>', html.escape(t))}</li>"
                         for t in trace)
         detail = f"<details><summary>Technical details</summary><ol>{lines}</ol></details>"
-    return f'<section class="nv-sieve" aria-label="How the collection was narrowed">{"".join(out)}{legend}{detail}</section>'
+    card = guardrail_card_html(guardrail_report)
+    return f'<section class="nv-sieve" aria-label="How the collection was narrowed">{"".join(out)}{legend}{card}{detail}</section>'
 
 
 def answer_md(question: str, body: str, earlier: list[tuple[str, str]], note: str = "") -> str:
@@ -1674,6 +1929,29 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
                 p_polish.click(post_polish, p_text, [p_text, p_meta], api_visibility="private")
                 gr.api(weekly_post, api_name="weekly_post")
 
+            with gr.Tab("Traces") as traces_tab:
+                gr.HTML(guardrails_catalog_html(), elem_classes="nv-flush")
+                with gr.Row(elem_classes="nv-filters"):
+                    t_filter = gr.Radio(
+                        [("All prompts", "all"), ("Flagged / blocked", "flagged"),
+                         ("PII detected", "pii"), ("Post rewrites", "polish")],
+                        value="all", label="Show",
+                    )
+                    t_refresh = gr.Button("Refresh", size="sm", variant="secondary")
+                t_view = gr.HTML(elem_classes="nv-flush")
+
+                def traces_view(filter_mode: str = "all") -> str:
+                    entries = read_recent_traces(
+                        app_settings.trace_log_path,
+                        limit=app_settings.trace_max_entries,
+                        filter_mode=filter_mode,
+                    )
+                    return traces_html(entries, log_path=str(app_settings.trace_log_path))
+
+                t_filter.change(traces_view, t_filter, t_view, api_visibility="private")
+                t_refresh.click(traces_view, t_filter, t_view, api_visibility="private")
+                traces_tab.select(traces_view, t_filter, t_view, api_visibility="private")
+
             with gr.Tab("Sources"):
                 stat = gr.HTML()
                 btn = gr.Button("Download the latest copy" if pull_mode else "Collect new items now",
@@ -1695,6 +1973,7 @@ def build_ui(store: CorpusStore, source_names: list[str], assistant_fn: Callable
         demo.load(latest_days, None, l_day, api_visibility="private")
         demo.load(latest, l_inputs, feed, api_name="latest_feed")
         demo.load(status, None, stat, api_name="status")
+        demo.load(traces_view, t_filter, t_view, api_visibility="private")
         demo.load(lambda: masthead_html(store), None, masthead, api_visibility="private")
         demo.load(landing, None, [map_intro, stats, trend, map_payload], api_visibility="private")
         demo.load(post_topic, topic_in, topic_out, api_visibility="private")

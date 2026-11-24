@@ -85,7 +85,7 @@ if hasattr(os, "register_at_fork"):
 
 class CorpusStore:
     def __init__(self, data_dir: Path, embeddings: Embeddings, dataset_repo: str | None = None,
-                 hf_token: str | None = None, retention_days: int = 180):
+                 hf_token: str | None = None, retention_days: int = 0):
         self.data_dir = Path(data_dir)
         self.embeddings = embeddings
         self.dataset_repo = dataset_repo
@@ -200,6 +200,8 @@ class CorpusStore:
         return list(fresh.values())
 
     def prune(self) -> int:
+        if self.retention_days <= 0:
+            return 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         with self._lock:
             old = [i for i, it in self.items.items() if parse_iso(it.published) < cutoff]

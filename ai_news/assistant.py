@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, Iterator
 
-from ai_news.observability import RagTracer
+from ai_news.observability import RagTracer, build_guardrail_report
 from ai_news.store import CorpusStore
 from ai_news.ui import REF_PAGE, answer_md, references_html, sieve_html
 
@@ -70,7 +70,8 @@ def run_events(graph, store: CorpusStore, question: str, history: list[str], fil
             tracer.finish(final)
         yield {"total": total, "steps": list(steps), "trace": list(trace),
                "answer": final.get("answer") or "No answer was produced. Please ask again.",
-               "references": final.get("references", []), "summarized": final.get("summarized", 0)}
+               "references": final.get("references", []), "summarized": final.get("summarized", 0),
+               "guardrail_report": build_guardrail_report(final)}
     except Exception as e:  # report instead of raising across the fork
         log.exception("assistant failed")
         yield {"error": f"{type(e).__name__}: {e}"[:500], "total": total, "steps": list(steps),
@@ -134,7 +135,7 @@ def render(events: Iterable[dict], history: list, question: str, view: dict | No
             yield out(error_message(ev["error"]), sieve_html(total, steps, trace), final=True)
             return
         if "answer" in ev:
-            yield out(ev["answer"], sieve_html(total, steps, trace), final=True,
-                      refs=ev["references"], summarized=ev.get("summarized", 0))
+            yield out(ev["answer"], sieve_html(total, steps, trace, guardrail_report=ev.get("guardrail_report")),
+                      final=True, refs=ev["references"], summarized=ev.get("summarized", 0))
             return
         yield out("_Working through the collection…_", sieve_html(total, steps, trace, working=True))

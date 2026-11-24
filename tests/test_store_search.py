@@ -37,6 +37,12 @@ def test_save_load_roundtrip_and_prune(store, tmp_path):
     assert fresh.prune() == 1  # the 200-day-old item
     assert len(fresh.vectors) == len(fresh.items)
 
+    # retention_days=0 (default) keeps all historical items (e.g. since 2010)
+    keep_all = CorpusStore(tmp_path, DeterministicFakeEmbedding(size=32), retention_days=0)
+    keep_all.add([make_item("2012 AlexNet paper", age_days=5000)])
+    assert keep_all.prune() == 0
+    assert len(keep_all.items) == 1
+
 
 def test_highlight_escapes_html():
     out = highlight("<script> RAG survey", "rag")

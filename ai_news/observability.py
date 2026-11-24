@@ -13,10 +13,16 @@ Design:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import statistics
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from ai_news.config import Settings, settings as default_settings
@@ -166,6 +172,189 @@ class LangfuseBackend:
                 log.debug("Langfuse flush failed: %s", e)
 
 
+# ------------------------------------------------------------------ Built-in Local JSONL & Composite backends
+_LOCAL_TRACE_LOCK = threading.Lock()
+
+
+class _LocalTraceHandle:
+    def __init__(
+        self,
+        path: Path,
+        name: str,
+        *,
+        inp: dict,
+        metadata: dict | None = None,
+        tags: list[str] | None = None,
+    ):
+        self._path = path
+        self._name = name
+        self._trace_id = uuid.uuid4().hex[:12]
+        self._started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        self._t0 = time.perf_counter()
+        self._input = dict(inp or {})
+        self._metadata = dict(metadata or {})
+        self._tags = list(tags or [])
+        self._spans: dict[str, dict] = {}
+        self._scores: dict[str, list] = {}
+        self._output: dict | None = None
+        self._written = False
+
+    def record_span(self, name: str, output: dict) -> None:
+        self._spans[name] = output
+
+    def record_score(self, name: str, value: float, comment: str = "") -> None:
+        self._scores[name] = [value, comment]
+
+    def finish(self, output: dict) -> None:
+        self._output = dict(output or {})
+
+    def _prompt_redacted(self) -> str:
+        if "question" in self._input:
+            return str(self._input.get("question") or "")
+        if "draft_preview" in self._input:
+            return str(self._input.get("draft_preview") or "")
+        return ""
+
+    def flush(self) -> None:
+        if self._written:
+            return
+        self._written = True
+        latency_ms = round((time.perf_counter() - self._t0) * 1000.0, 1)
+        out = self._output or {}
+        record = {
+            "trace_id": self._trace_id,
+            "timestamp": self._started_at,
+            "entrypoint": self._name,
+            "latency_ms": latency_ms,
+            "prompt_redacted": self._prompt_redacted(),
+            "input": self._input,
+            "metadata": self._metadata,
+            "tags": self._tags,
+            "spans": self._spans,
+            "scores": self._scores,
+            "guardrail_report": out.get("guardrail_report"),
+            "output": {k: v for k, v in out.items() if k != "guardrail_report"},
+            "error": out.get("error"),
+        }
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+            with _LOCAL_TRACE_LOCK:
+                with self._path.open("a", encoding="utf-8") as f:
+                    f.write(line)
+        except Exception as e:
+            log.warning("Local JSONL trace write failed (%s): %s", self._path, e)
+
+
+class LocalJsonlBackend:
+    """Always-available local JSONL trace backend (zero external dependencies, PII-redacted)."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._pending: list[_LocalTraceHandle] = []
+
+    def start_trace(self, name: str, *, input: dict, metadata: dict | None = None,
+                    tags: list[str] | None = None) -> TraceHandle | None:
+        handle = _LocalTraceHandle(self.path, name, inp=input, metadata=metadata, tags=tags)
+        self._pending.append(handle)
+        return handle
+
+    def langchain_callbacks(self) -> list[Any]:
+        return []
+
+    def flush(self) -> None:
+        while self._pending:
+            self._pending.pop(0).flush()
+
+
+class _CompositeTraceHandle:
+    def __init__(self, handles: list[TraceHandle]):
+        self._handles = handles
+
+    def record_span(self, name: str, output: dict) -> None:
+        for h in self._handles:
+            h.record_span(name, output)
+
+    def record_score(self, name: str, value: float, comment: str = "") -> None:
+        for h in self._handles:
+            h.record_score(name, value, comment)
+
+    def finish(self, output: dict) -> None:
+        for h in self._handles:
+            h.finish(output)
+
+
+class CompositeBackend:
+    """Fan-out observability backend (e.g., local JSONL + Langfuse simultaneously)."""
+
+    def __init__(self, backends: list[ObservabilityBackend]):
+        self._backends = list(backends)
+
+    def start_trace(self, name: str, *, input: dict, metadata: dict | None = None,
+                    tags: list[str] | None = None) -> TraceHandle | None:
+        handles = [
+            h for b in self._backends
+            if (h := b.start_trace(name, input=input, metadata=metadata, tags=tags)) is not None
+        ]
+        return _CompositeTraceHandle(handles) if handles else None
+
+    def langchain_callbacks(self) -> list[Any]:
+        cbs: list[Any] = []
+        for b in self._backends:
+            cbs.extend(b.langchain_callbacks())
+        return cbs
+
+    def flush(self) -> None:
+        for b in self._backends:
+            b.flush()
+
+
+def read_recent_traces(
+    path: Path | None = None,
+    *,
+    limit: int = 100,
+    filter_mode: str = "all",
+) -> list[dict]:
+    """Read recent per-prompt traces from the local JSONL log, newest first."""
+    target = Path(path) if path is not None else default_settings.trace_log_path
+    if not target.exists():
+        return []
+    entries: list[dict] = []
+    try:
+        with target.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError as e:
+        log.warning("Failed to read trace log %s: %s", target, e)
+        return []
+
+    entries.reverse()
+    mode = (filter_mode or "all").strip().lower()
+    if mode != "all":
+        filtered: list[dict] = []
+        for e in entries:
+            rep = e.get("guardrail_report") or {}
+            in_flags = rep.get("input_flags") or []
+            out_flags = rep.get("output_flags") or []
+            in_pii = rep.get("input_pii") or []
+            out_pii = rep.get("output_pii") or []
+            blocked = rep.get("allowed") is False or bool((e.get("output") or {}).get("guardrail_blocked")) or bool((e.get("output") or {}).get("blocked"))
+            if mode == "flagged" and (blocked or in_flags or out_flags or (rep.get("docs_sanitized") or 0) > 0):
+                filtered.append(e)
+            elif mode == "pii" and (in_pii or out_pii or (e.get("scores", {}).get("pii_detected", [0])[0] > 0) or (e.get("scores", {}).get("polish_pii_detected", [0])[0] > 0)):
+                filtered.append(e)
+            elif mode == "polish" and e.get("entrypoint") == "polish_post":
+                filtered.append(e)
+        entries = filtered
+    return entries[: max(1, int(limit))]
+
+
 # ------------------------------------------------------------------ Backend registry & selection
 BackendFactory = Callable[[Settings], ObservabilityBackend | None]
 _BACKENDS: dict[str, BackendFactory] = {}
@@ -185,31 +374,48 @@ def _langfuse_configured(cfg: Settings) -> bool:
 
 
 def is_enabled(cfg: Settings | None = None) -> bool:
-    """Return True only when an observability backend is explicitly active and configured."""
+    """Return True when at least one observability backend (local JSONL, Langfuse, or custom) is active."""
     cfg = cfg or default_settings
     mode = (cfg.observability_backend or "auto").strip().lower()
     if mode in {"none", "off", "false", "0", ""}:
         return False
     if mode in _BACKENDS:
         return True
-    if mode in {"auto", "langfuse"}:
+    if mode == "local":
+        return bool(cfg.trace_local_enabled)
+    if mode == "langfuse":
         return _langfuse_configured(cfg)
+    if mode == "auto":
+        return bool(cfg.trace_local_enabled) or _langfuse_configured(cfg)
     return False
 
 
 def get_backend(cfg: Settings | None = None) -> ObservabilityBackend | None:
-    """Return the active ObservabilityBackend, or None to skip all tracing/observability."""
+    """Return the active ObservabilityBackend (single or Composite), or None to skip tracing."""
     cfg = cfg or default_settings
     mode = (cfg.observability_backend or "auto").strip().lower()
     if mode in {"none", "off", "false", "0", ""}:
         return None
     if mode in _BACKENDS:
         return _BACKENDS[mode](cfg)
-    if mode in {"auto", "langfuse"}:
+    if mode == "local":
+        return LocalJsonlBackend(cfg.trace_log_path) if cfg.trace_local_enabled else None
+    if mode == "langfuse":
         if not _langfuse_configured(cfg):
             return None
         backend = LangfuseBackend(cfg)
         return backend if backend.ready else None
+    if mode == "auto":
+        backends: list[ObservabilityBackend] = []
+        if cfg.trace_local_enabled:
+            backends.append(LocalJsonlBackend(cfg.trace_log_path))
+        if _langfuse_configured(cfg):
+            lf = LangfuseBackend(cfg)
+            if lf.ready:
+                backends.append(lf)
+        if not backends:
+            return None
+        return backends[0] if len(backends) == 1 else CompositeBackend(backends)
     log.warning("Unknown OBSERVABILITY_BACKEND=%r; skipping observability", mode)
     return None
 
@@ -325,6 +531,27 @@ def _compact_cand(c: dict) -> dict:
     }
 
 
+def build_guardrail_report(state: dict, *, cached: bool = False) -> dict:
+    """Build a compact, PII-free summary of all guardrail & PII checks for one RAG prompt."""
+    blocked = bool(state.get("guardrail_blocked"))
+    og = state.get("output_guardrail") or {}
+    return {
+        "allowed": not blocked,
+        "blocked_reason": state.get("guardrail_reason"),
+        "input_flags": list(state.get("guardrail_flags") or []),
+        "input_pii": list(state.get("pii_findings") or []),
+        "docs_sanitized": int(state.get("docs_sanitized") or 0),
+        "output_flags": list(og.get("flags") or []),
+        "output_pii": list(og.get("pii_findings") or []),
+        "valid_citations": list(og.get("valid_citations") or []),
+        "invalid_citations": list(og.get("invalid_citations") or []),
+        "hallucinated_urls": list(og.get("hallucinated_urls") or []),
+        "grounding_score": og.get("grounding_score"),
+        "checks": list(state.get("guardrail_checks") or []),
+        "cached": cached,
+    }
+
+
 def summarize_node_object(node: str, delta: dict) -> dict:
     """Produce a compact, PII-free structured snapshot of the objects flowing through a RAG node."""
     if node == "input_guardrail":
@@ -370,6 +597,7 @@ def summarize_node_object(node: str, delta: dict) -> dict:
             "total_reviewed": len(verdicts),
             "total_relevant": len(rel),
             "pass_rate": round(len(rel) / len(verdicts), 4) if verdicts else 0.0,
+            "docs_sanitized": int(delta.get("docs_sanitized") or 0),
         }
     if node == "rewrite_query":
         return {"queries": delta.get("queries") or [], "retries": delta.get("retries")}
@@ -382,6 +610,7 @@ def summarize_node_object(node: str, delta: dict) -> dict:
             "answer_chars": len(str(delta.get("answer") or "")),
             "references_count": len(refs),
             "summarized_count": delta.get("summarized", 0),
+            "docs_sanitized": int(delta.get("docs_sanitized") or 0),
         }
     if node == "output_guardrail":
         return dict(delta.get("output_guardrail") or {})
@@ -464,6 +693,7 @@ class RagTracer:
                 "references_count": len(final_state.get("references") or []),
                 "summarized": final_state.get("summarized", 0),
                 "guardrail_blocked": bool(final_state.get("guardrail_blocked")),
+                "guardrail_report": build_guardrail_report(final_state),
             }
         )
         self._handle.finish(out)
@@ -479,6 +709,57 @@ class RagTracer:
         self._backend.flush()
 
 
+def trace_cached_ask(
+    question: str,
+    cached_event: dict,
+    *,
+    filters: dict | None = None,
+    cfg: Settings | None = None,
+    backend: ObservabilityBackend | None = None,
+) -> None:
+    """Record a lightweight per-prompt trace when an Ask query is served from QueryCache."""
+    if backend is None:
+        backend = get_backend(cfg)
+    if backend is None:
+        return
+    redacted_q = redact_pii(question)
+    base_rep = dict(cached_event.get("guardrail_report") or {})
+    report = {
+        "allowed": bool(base_rep.get("allowed", True)),
+        "blocked_reason": base_rep.get("blocked_reason"),
+        "input_flags": list(base_rep.get("input_flags") or []),
+        "input_pii": list(base_rep.get("input_pii") or []),
+        "docs_sanitized": int(base_rep.get("docs_sanitized") or 0),
+        "output_flags": list(base_rep.get("output_flags") or []),
+        "output_pii": list(base_rep.get("output_pii") or []),
+        "valid_citations": list(base_rep.get("valid_citations") or []),
+        "invalid_citations": list(base_rep.get("invalid_citations") or []),
+        "hallucinated_urls": list(base_rep.get("hallucinated_urls") or []),
+        "grounding_score": base_rep.get("grounding_score"),
+        "checks": list(base_rep.get("checks") or []),
+        "cached": True,
+    }
+    handle = backend.start_trace(
+        "rag_assistant_cached",
+        input={"question": redacted_q.text, "filters": filters or {}},
+        metadata={"cache_hit": True},
+        tags=["rag", "cache_hit"],
+    )
+    if handle is None:
+        return
+    handle.finish({
+        "answer": redact_pii(str(cached_event.get("answer") or "")).text,
+        "references_count": len(cached_event.get("references") or []),
+        "summarized": cached_event.get("summarized", 0),
+        "guardrail_blocked": not report["allowed"],
+        "guardrail_report": report,
+    })
+    handle.record_score("guardrail_passed", 1.0 if report["allowed"] else 0.0, "cached")
+    handle.record_score("pii_detected", 1.0 if redacted_q.had_pii else 0.0, "none" if not redacted_q.had_pii else "redacted")
+    handle.record_score("cache_hit", 1.0, "served from QueryCache")
+    backend.flush()
+
+
 def trace_polish_run(
     draft: str,
     result_text: str,
@@ -486,6 +767,11 @@ def trace_polish_run(
     *,
     blocked: bool = False,
     pii_detected: bool = False,
+    input_flags: list[str] | None = None,
+    input_pii_findings: list[dict] | None = None,
+    output_flags: list[str] | None = None,
+    output_pii_findings: list[dict] | None = None,
+    checks: list[dict] | None = None,
     cfg: Settings | None = None,
     backend: ObservabilityBackend | None = None,
     client: Any | None = None,
@@ -495,11 +781,35 @@ def trace_polish_run(
         backend = LangfuseBackend(cfg or default_settings, client=client) if client is not None else get_backend(cfg)
     if backend is None:
         return
+    report = {
+        "allowed": not blocked,
+        "blocked_reason": note if blocked else None,
+        "input_flags": list(input_flags or []),
+        "input_pii": list(input_pii_findings or []),
+        "docs_sanitized": 0,
+        "output_flags": list(output_flags or []),
+        "output_pii": list(output_pii_findings or []),
+        "valid_citations": [],
+        "invalid_citations": [],
+        "hallucinated_urls": [],
+        "checks": list(checks or []),
+        "cached": False,
+    }
     inp = {"draft_chars": len(draft), "draft_preview": redact_pii(draft[:400]).text}
-    out = {"result_chars": len(result_text), "note": note, "blocked": blocked}
+    out = {"result_chars": len(result_text), "note": note, "blocked": blocked, "guardrail_report": report}
     handle = backend.start_trace("polish_post", input=inp, tags=["post"])
     if handle is None:
         return
+    handle.record_span("node:input_guardrail", {
+        "blocked": blocked,
+        "flags": report["input_flags"],
+        "pii_findings": report["input_pii"],
+    })
+    if not blocked:
+        handle.record_span("node:output_guardrail", {
+            "flags": report["output_flags"],
+            "pii_findings": report["output_pii"],
+        })
     handle.finish(out)
     kept_links = 0.0 if ("dropped some links" in note or "empty" in note or blocked) else 1.0
     for name, val in (

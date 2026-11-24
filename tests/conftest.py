@@ -40,6 +40,16 @@ def items():
     ]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_trace_log(tmp_path, monkeypatch):
+    """Ensure unit tests never write to the real data/guardrail_traces.jsonl file."""
+    import ai_news.observability as obs
+    from dataclasses import replace
+
+    isolated = replace(obs.default_settings, trace_log_path=tmp_path / "guardrail_traces.jsonl")
+    monkeypatch.setattr(obs, "default_settings", isolated)
+
+
 @pytest.fixture
 def store(tmp_path, items):
     s = CorpusStore(tmp_path, DeterministicFakeEmbedding(size=32))

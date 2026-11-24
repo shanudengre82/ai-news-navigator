@@ -52,6 +52,8 @@ class Settings:
     # GitHub Action (.github/workflows/refresh-corpus.yml) pushes to DATASET_REPO.
     refresh_mode: str = field(default_factory=lambda: os.getenv("REFRESH_MODE", "fetch").strip().lower())
     lookback_days: int = field(default_factory=lambda: int(os.getenv("LOOKBACK_DAYS", "30")))
+    retention_days: int = field(default_factory=lambda: int(os.getenv("RETENTION_DAYS", "0")))
+    corpus_min_year: int = field(default_factory=lambda: int(os.getenv("CORPUS_MIN_YEAR", "2010")))
     refresh_hours: float = field(default_factory=lambda: float(os.getenv("REFRESH_HOURS", "168")))
     refresh_on_start: bool = field(default_factory=lambda: _bool("REFRESH_ON_START", False))
     push_to_hub: bool = field(default_factory=lambda: _bool("PUSH_TO_HUB", True))
@@ -68,9 +70,15 @@ class Settings:
     guardrails_pii_mode: str = field(default_factory=lambda: os.getenv("GUARDRAILS_PII_MODE", "redact").strip().lower())
     guardrails_max_query_chars: int = field(default_factory=lambda: int(os.getenv("GUARDRAILS_MAX_QUERY_CHARS", "2000")))
 
-    # Provider-agnostic observability ("auto", "none", "langfuse", or a registered custom backend).
-    # In "auto" mode, Langfuse is skipped completely whenever its credentials are missing.
+    # Provider-agnostic observability ("auto", "local", "none", "langfuse", or a registered custom backend).
+    # By default, per-prompt PII-redacted guardrail traces are recorded locally to JSONL and also sent to
+    # Langfuse whenever LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are configured.
     observability_backend: str = field(default_factory=lambda: os.getenv("OBSERVABILITY_BACKEND", "auto").strip().lower())
+    trace_local_enabled: bool = field(default_factory=lambda: _bool("TRACE_LOCAL_ENABLED", True))
+    trace_log_path: Path = field(default_factory=lambda: Path(
+        os.getenv("TRACE_LOG_PATH", str(Path(os.getenv("DATA_DIR", ROOT / "data")) / "guardrail_traces.jsonl"))
+    ))
+    trace_max_entries: int = field(default_factory=lambda: int(os.getenv("TRACE_MAX_ENTRIES", "500")))
     langfuse_public_key: str | None = field(default_factory=lambda: os.getenv("LANGFUSE_PUBLIC_KEY") or None)
     langfuse_secret_key: str | None = field(default_factory=lambda: os.getenv("LANGFUSE_SECRET_KEY") or None)
     langfuse_host: str = field(default_factory=lambda: os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"))

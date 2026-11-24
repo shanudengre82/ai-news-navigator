@@ -30,6 +30,27 @@ def test_parse_hf_daily_papers():
     assert isinstance(items[0].upvotes, int)
 
 
+def test_fetch_all_hf_papers_dedupes_and_filters_since_year(monkeypatch):
+    from datetime import date
+
+    from conftest import make_item
+
+    p_2012 = make_item("Old 2012 paper", url="https://arxiv.org/abs/1201.0001", upvotes=5)
+    p_2012.published = "2012-06-01T00:00:00+00:00"
+    p_2008 = make_item("Too old 2008 paper", url="https://arxiv.org/abs/0801.0001", upvotes=9)
+    p_2008.published = "2008-06-01T00:00:00+00:00"
+    p_dup = make_item("Old 2012 paper", summary="Much longer summary", url="https://arxiv.org/abs/1201.0001", upvotes=42)
+    p_dup.published = "2012-06-01T00:00:00+00:00"
+
+    def fake_day(d):
+        return [p_2012, p_2008] if d == date(2024, 1, 1) else [p_dup]
+
+    monkeypatch.setattr(hf_papers, "_fetch_day", fake_day)
+    got = hf_papers.fetch_all_hf_papers(since_year=2010, start_date=date(2024, 1, 1), end_date=date(2024, 1, 2), workers=2)
+    assert len(got) == 1
+    assert got[0].upvotes == 42 and got[0].summary == "Much longer summary"
+
+
 def test_parse_rss_strips_html_and_skips_undated():
     items = rss.parse_feed((FIXTURES / "blog.xml").read_bytes(), "Example")
     assert len(items) == 1

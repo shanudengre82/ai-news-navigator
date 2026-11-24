@@ -13,7 +13,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from ai_news.fetchers.common import parse_iso
-from ai_news.guardrails import MAX_QUERY_CHARS, check_input, check_output, sanitize_document
+from ai_news.guardrails import MAX_QUERY_CHARS, check_input, check_output, sanitize_document_with_stats
 from ai_news.rag import prompts
 from ai_news.rag.state import Candidate, GraphState
 from ai_news.schema import NewsItem
@@ -103,21 +103,40 @@ def recency_boost(published: str, half_life_days: float = 30.0) -> float:
     return 0.5 ** (max(age, 0) / half_life_days)
 
 
+def format_docs_with_stats(cands: list[Candidate], summary_chars: int) -> tuple[str, int]:
+    blocks = []
+    sanitized_docs = 0
+    for n, c in enumerate(cands, 1):
+        t, h1 = sanitize_document_with_stats(c["title"])
+        s, h2 = sanitize_document_with_stats(c["summary"][:summary_chars])
+        if h1 + h2 > 0:
+            sanitized_docs += 1
+        blocks.append(f"[{n}] {t} ({c['source']}, {c['published'][:10]})\n{s}")
+    return "\n\n".join(blocks), sanitized_docs
+
+
 def format_docs(cands: list[Candidate], summary_chars: int) -> str:
-    return "\n\n".join(
-        f"[{n}] {sanitize_document(c['title'])} ({c['source']}, {c['published'][:10]})\n"
-        f"{sanitize_document(c['summary'][:summary_chars])}"
-        for n, c in enumerate(cands, 1))
+    return format_docs_with_stats(cands, summary_chars)[0]
+
+
+def format_docs_for_generate_with_stats(
+    cands: list[Candidate], fallback_chars: int = GENERATE_FALLBACK_CHARS
+) -> tuple[str, int]:
+    """Reuse compact LLM/extractive digests in `generate` instead of re-sending full 700-char abstracts."""
+    blocks = []
+    sanitized_docs = 0
+    for n, c in enumerate(cands, 1):
+        body = (c.get("digest") or "").strip() or c["summary"][:fallback_chars]
+        t, h1 = sanitize_document_with_stats(c["title"])
+        b, h2 = sanitize_document_with_stats(body)
+        if h1 + h2 > 0:
+            sanitized_docs += 1
+        blocks.append(f"[{n}] {t} ({c['source']}, {c['published'][:10]})\n{b}")
+    return "\n\n".join(blocks), sanitized_docs
 
 
 def format_docs_for_generate(cands: list[Candidate], fallback_chars: int = GENERATE_FALLBACK_CHARS) -> str:
-    """Reuse compact LLM/extractive digests in `generate` instead of re-sending full 700-char abstracts."""
-    blocks = []
-    for n, c in enumerate(cands, 1):
-        body = (c.get("digest") or "").strip() or c["summary"][:fallback_chars]
-        blocks.append(f"[{n}] {sanitize_document(c['title'])} ({c['source']}, {c['published'][:10]})\n"
-                      f"{sanitize_document(body)}")
-    return "\n\n".join(blocks)
+    return format_docs_for_generate_with_stats(cands, fallback_chars)[0]
 
 
 class RagNodes:
@@ -167,6 +186,7 @@ class RagNodes:
             max_chars=self.max_query_chars,
         )
         pii_list = [f.to_dict() for f in res.pii.findings]
+        checks_list = [c.to_dict() for c in res.checks]
         if not res.allowed:
             return {
                 "question": res.sanitized_text,
@@ -174,6 +194,7 @@ class RagNodes:
                 "guardrail_blocked": True,
                 "guardrail_reason": res.blocked_reason,
                 "guardrail_flags": res.flags,
+                "guardrail_checks": checks_list,
                 "pii_findings": pii_list,
                 "answer": res.blocked_reason or "Request blocked by input guardrails.",
                 "references": [],
@@ -187,6 +208,7 @@ class RagNodes:
             "guardrail_blocked": False,
             "guardrail_reason": None,
             "guardrail_flags": res.flags,
+            "guardrail_checks": checks_list,
             "pii_findings": pii_list,
             "trace": [f"**Input guardrail** → {note}"],
         }
@@ -322,10 +344,12 @@ class RagNodes:
                     verdicts[c["id"]] = {"relevant": True, "digest": _short_digest(c.get("summary", ""))}
                 auto_ok = len(high)
                 todo = []  # already have >= MIN_RELEVANT high-confidence matches; skip LLM judge
+        sanitized_here = 0
         if todo:
             try:
+                docs_text, sanitized_here = format_docs_with_stats(todo, GRADE_SUMMARY_CHARS)
                 out = extract_json(self._ask(
-                    prompts.GRADE.format(question=state["question"], docs=format_docs(todo, GRADE_SUMMARY_CHARS)),
+                    prompts.GRADE.format(question=state["question"], docs=docs_text),
                     max_tokens=MAX_TOKENS_GRADE,
                 ))
                 if isinstance(out, dict):
@@ -341,13 +365,16 @@ class RagNodes:
                 verdicts.update({c["id"]: {"relevant": True, "digest": ""} for c in todo[:5]})
         matches = [c for c in matches if verdicts.get(c["id"], {}).get("relevant", True)]
         relevant = [{**c, "digest": verdicts[c["id"]]["digest"]} for c in matches if c["id"] in verdicts]
+        total_sanitized = int(state.get("docs_sanitized") or 0) + sanitized_here
         if auto_ok:
             note = f"auto-accepted {auto_ok} high-confidence matches (≥ {self.grade_skip_threshold:.2f}), LLM skipped"
         else:
             n_ok = sum(1 for c in todo if verdicts.get(c["id"], {}).get("relevant"))
             note = f"{n_ok}/{len(todo)} new relevant"
+        san_note = f"; sanitized {sanitized_here} doc(s)" if sanitized_here else ""
         return {"verdicts": verdicts, "matches": matches, "relevant": relevant,
-                "trace": [f"**Grade** (LLM judge + digests) → {note}, {len(relevant)} relevant in total"]}
+                "docs_sanitized": total_sanitized,
+                "trace": [f"**Grade** (LLM judge + digests) → {note}, {len(relevant)} relevant in total{san_note}"]}
 
     def route_after_grade(self, state: GraphState) -> str:
         if len(state.get("relevant", [])) >= MIN_RELEVANT:
@@ -411,31 +438,48 @@ class RagNodes:
                               "Try broader terms.",
                     "references": [], "trace": ["**Generate** → nothing to answer from"]}
         used = refs[:min(len(relevant), self._grade_top())] or refs[:MIN_KEEP]
+        gen_docs, sanitized_here = format_docs_for_generate_with_stats(used)
+        total_sanitized = int(state.get("docs_sanitized") or 0) + sanitized_here
         answer = self._ask(
-            prompts.GENERATE.format(question=state["question"], docs=format_docs_for_generate(used)),
+            prompts.GENERATE.format(question=state["question"], docs=gen_docs),
             max_tokens=MAX_TOKENS_GENERATE,
         )
         if not relevant:
             answer = "_No result passed the relevance check; these are the closest matches._\n\n" + answer
         padded = f" ({len(refs) - n_pad} + {n_pad} low-match to reach {MIN_RESULTS})" if n_pad else ""
         return {"answer": answer, "references": refs, "summarized": len(used),
+                "docs_sanitized": total_sanitized,
                 "trace": [f"**Generate** → summary from {len(used)} sources, {len(refs)} references{padded}"]}
 
     def output_guardrail(self, state: GraphState) -> dict:
         refs = state.get("references") or []
         summarized = int(state.get("summarized") or 0)
         max_cite = summarized if summarized > 0 else len(refs)
+        used = refs[:max_cite] if max_cite else []
         allowed_urls = [r["url"] for r in refs if r.get("url")] if refs else None
+        source_texts = [f"{r.get('title', '')} {r.get('digest', '')} {r.get('summary', '')}" for r in used] if used else None
         res = check_output(
             state.get("answer") or "",
             max_citation=max_cite if refs else None,
             allowed_urls=allowed_urls,
+            source_texts=source_texts,
             enabled=self.guardrails_enabled,
         )
+        docs_san = int(state.get("docs_sanitized") or 0)
+        ctx_check = {
+            "id": "indirect_injection",
+            "name": "Indirect Injection Sanitization",
+            "pillar": "Technical",
+            "stage": "Context",
+            "status": "sanitized" if docs_san else "passed",
+            "detail": f"{docs_san} doc(s) neutralized" if docs_san else "clean",
+        }
+        all_checks = list(state.get("guardrail_checks") or []) + [ctx_check] + [c.to_dict() for c in res.checks]
         meta = {
             "valid_citations": res.valid_citations,
             "invalid_citations": res.invalid_citations,
             "hallucinated_urls": res.hallucinated_urls,
+            "grounding_score": res.grounding_score,
             "pii_redacted": res.pii.had_pii,
             "pii_findings": [f.to_dict() for f in res.pii.findings],
             "flags": res.flags,
@@ -444,5 +488,6 @@ class RagNodes:
         return {
             "answer": res.text,
             "output_guardrail": meta,
+            "guardrail_checks": all_checks,
             "trace": [f"**Output guardrail** → {note}"],
         }

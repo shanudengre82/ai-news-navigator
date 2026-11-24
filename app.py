@@ -24,7 +24,7 @@ from ai_news.assistant import message_text, render, run_events  # noqa: E402
 from ai_news.atlas import research_map  # noqa: E402
 from ai_news.cache import QueryCache  # noqa: E402
 from ai_news.guardrails import MAX_DRAFT_CHARS, check_input, check_output, redact_pii  # noqa: E402
-from ai_news.observability import trace_polish_run  # noqa: E402
+from ai_news.observability import trace_cached_ask, trace_polish_run  # noqa: E402
 from ai_news.post import keep_links  # noqa: E402
 from ai_news.rag.prompts import POLISH  # noqa: E402
 from ai_news.ui import CSS, FIT_JS, FONTS_HEAD, REF_PAGE, STEPS_EMPTY, THEME_JS, build_ui, theme  # noqa: E402
@@ -34,7 +34,8 @@ log = logging.getLogger("app")
 
 # ---- corpus (CPU) ----
 store = CorpusStore(settings.data_dir, load_embeddings(settings.embed_model_id),
-                    dataset_repo=settings.dataset_repo, hf_token=settings.hf_token)
+                    dataset_repo=settings.dataset_repo, hf_token=settings.hf_token,
+                    retention_days=settings.retention_days)
 store.pull()
 store.load()
 
@@ -98,7 +99,9 @@ def _cached_or_gpu(question: str, history_texts: list[str], filters: dict):
     if can_cache:
         hit = query_cache.get(key)
         if hit is not None:
-            yield hit
+            trace_cached_ask(question, hit, filters=filters)
+            rep = {**(hit.get("guardrail_report") or {}), "cached": True}
+            yield {**hit, "guardrail_report": rep}
             return
     for ev in _guarded(_assistant_gpu(question, history_texts, filters)):
         if can_cache and "answer" in ev and ev.get("references"):
@@ -156,10 +159,16 @@ def polish_post(draft: str) -> tuple[str, str]:
         enabled=settings.guardrails_enabled,
         pii_mode=settings.guardrails_pii_mode,
         max_chars=MAX_DRAFT_CHARS,
+        check_topic=False,
     )
+    ig_pii = [f.to_dict() for f in ig.pii.findings]
+    ig_checks = [c.to_dict() for c in ig.checks]
     if not ig.allowed:
         note = ig.blocked_reason or "The draft was blocked by safety/privacy guardrails."
-        trace_polish_run(draft, draft, note, blocked=True, pii_detected=ig.pii.had_pii)
+        trace_polish_run(
+            draft, draft, note, blocked=True, pii_detected=ig.pii.had_pii,
+            input_flags=ig.flags, input_pii_findings=ig_pii, checks=ig_checks,
+        )
         return draft, note
     try:
         raw = _polish_gpu(ig.sanitized_text)
@@ -167,13 +176,21 @@ def polish_post(draft: str) -> tuple[str, str]:
         out, note = keep_links(ig.sanitized_text, og.text)
         if ig.pii.had_pii and not note:
             note = f"Rewritten with AI (redacted PII: {', '.join(ig.pii.entity_types)}). Check it before posting."
-        trace_polish_run(ig.sanitized_text, out, note, blocked=False,
-                         pii_detected=ig.pii.had_pii or og.pii.had_pii)
+        trace_polish_run(
+            ig.sanitized_text, out, note, blocked=False,
+            pii_detected=ig.pii.had_pii or og.pii.had_pii,
+            input_flags=ig.flags, input_pii_findings=ig_pii,
+            output_flags=og.flags, output_pii_findings=[f.to_dict() for f in og.pii.findings],
+            checks=ig_checks + [c.to_dict() for c in og.checks],
+        )
         return out, note
     except Exception as e:
         log.exception("ZeroGPU rewrite failed")
         note = f"The rewrite did not run ({type(e).__name__}). The draft is unchanged; try again later."
-        trace_polish_run(ig.sanitized_text, draft, note, blocked=False, pii_detected=ig.pii.had_pii)
+        trace_polish_run(
+            ig.sanitized_text, draft, note, blocked=False, pii_detected=ig.pii.had_pii,
+            input_flags=ig.flags, input_pii_findings=ig_pii, checks=ig_checks,
+        )
         return draft, note
 
 

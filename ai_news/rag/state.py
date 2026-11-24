@@ -45,6 +45,8 @@ class GraphState(TypedDict, total=False):
     guardrail_blocked: bool     # True when input_guardrail short-circuits the graph
     guardrail_reason: str | None
     guardrail_flags: list[str]
+    guardrail_checks: list[dict]  # per-rule verdicts (id, name, pillar, stage, status, detail)
     pii_findings: list[dict]    # entity_type + count only (never raw PII)
+    docs_sanitized: int         # count of retrieved documents neutralized for indirect injection
     output_guardrail: dict      # citation validity, URL check, output PII metadata
     trace: Annotated[list[str], operator.add]

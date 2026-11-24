@@ -43,12 +43,13 @@ def load_chat_model(backend: str, model_id: str, max_new_tokens: int = 900, hf_t
 from ai_news.reranker import CrossEncoderScorer, Reranker, TwoStageReranker  # noqa: F401
 
 
-def load_embeddings(model_id: str):
-    """CPU embeddings: background refreshes run outside any GPU context."""
+def load_embeddings(model_id: str, *, device: str = "cpu", batch_size: int = 64):
+    """Load BGE/SentenceTransformer embeddings. Defaults to CPU for ZeroGPU background refreshes;
+    pass device='cuda' from local CLI scripts for fast historical backfills."""
     from langchain_huggingface import HuggingFaceEmbeddings
     query_kwargs = {"normalize_embeddings": True}
     if "bge-" in model_id and "-en" in model_id:  # BGE v1.5 retrieves better with its query instruction
         query_kwargs["prompt"] = "Represent this sentence for searching relevant passages: "
-    return HuggingFaceEmbeddings(model_name=model_id, model_kwargs={"device": "cpu"},
-                                 encode_kwargs={"normalize_embeddings": True, "batch_size": 64},
+    return HuggingFaceEmbeddings(model_name=model_id, model_kwargs={"device": device},
+                                 encode_kwargs={"normalize_embeddings": True, "batch_size": batch_size},
                                  query_encode_kwargs=query_kwargs)
